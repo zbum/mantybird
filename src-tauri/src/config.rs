@@ -36,9 +36,27 @@ pub struct StoredConfig {
     pub folder_labels: Option<HashMap<String, String>>,
     #[serde(default)]
     pub mark_seen_delay_seconds: u32,
+    #[serde(default)]
+    pub last_mailbox: Option<String>,
+    #[serde(default)]
+    pub expanded_folders: Vec<String>,
     // Back-compat with the old single-account schema.
     #[serde(default, skip_serializing)]
     pub account: Option<Account>,
+}
+
+pub fn set_last_mailbox(mailbox: Option<String>) -> Result<StoredConfig> {
+    let mut cfg = load();
+    cfg.last_mailbox = mailbox;
+    save(&cfg)?;
+    Ok(cfg)
+}
+
+pub fn set_expanded_folders(paths: Vec<String>) -> Result<StoredConfig> {
+    let mut cfg = load();
+    cfg.expanded_folders = paths;
+    save(&cfg)?;
+    Ok(cfg)
 }
 
 pub fn set_folder_labels(labels: HashMap<String, String>) -> Result<StoredConfig> {

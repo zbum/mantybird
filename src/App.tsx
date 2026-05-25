@@ -211,12 +211,18 @@ export default function App() {
   async function startWithAccount(acc: Account) {
     setAccount(acc);
     let pw = await api.loadPassword(acc);
+    const savedExpanded = await api
+      .getExpandedFolders()
+      .catch(() => [] as string[]);
+    const expandedFromConfig =
+      savedExpanded.length > 0 ? new Set(savedExpanded) : null;
     try {
       const cachedF = await api.cachedFolders(acc);
       if (cachedF.length > 0) {
         setFolders(cachedF);
         setExpanded(
-          new Set(cachedF.filter((f) => f.has_children).map((f) => f.raw)),
+          expandedFromConfig ??
+            new Set(cachedF.filter((f) => f.has_children).map((f) => f.raw)),
         );
         setScreen("mailbox");
         setStatus(`Cached · ${cachedF.length} folders · reconnecting…`);
@@ -238,10 +244,20 @@ export default function App() {
           );
           setFolders(fs);
           setExpanded(
-            new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
+            expandedFromConfig ??
+              new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
           );
           setScreen("mailbox");
           setStatus(`Connected · ${fs.length} folders`);
+          try {
+            const last = await api.getLastMailbox();
+            if (last) {
+              const match = fs.find((f) => f.raw === last);
+              if (match) handleSelectFolder(match);
+            }
+          } catch (e) {
+            console.warn("restore last mailbox failed", e);
+          }
           return;
         } catch (err) {
           if (isAuthError(err)) {
@@ -471,6 +487,7 @@ export default function App() {
     setEnvelopes([]);
     setNoMore(false);
     setServerResults(null);
+    api.setLastMailbox(folder.raw).catch(() => {});
     setStatus(`Loading ${folder.leaf}…`);
 
     try {
@@ -677,6 +694,7 @@ export default function App() {
       const next = new Set(prev);
       if (next.has(raw)) next.delete(raw);
       else next.add(raw);
+      api.setExpandedFolders(Array.from(next)).catch(() => {});
       return next;
     });
   }
@@ -1110,9 +1128,6 @@ export default function App() {
             >
               새 메일
             </button>
-            <span className="who">
-              {account.name || `${account.username}@${account.host}`}
-            </span>
             <span className="spacer" />
             <input
               className="search-input"
