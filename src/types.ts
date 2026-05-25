@@ -21,6 +21,7 @@ export interface StoredConfig {
   current_key: string | null;
   download_dir: string | null;
   folder_labels: Record<string, string> | null;
+  mark_seen_delay_seconds: number;
 }
 
 export const DEFAULT_FOLDER_LABELS: Record<SpecialUse, string> = {

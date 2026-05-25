@@ -38,11 +38,12 @@ button:disabled {
 
 input {
   font: inherit;
+  font-size: 13px;
   color: inherit;
   background: #2a2d33;
   border: 1px solid #353941;
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 6px 10px;
   width: 100%;
 }
 input:focus {
@@ -493,6 +494,60 @@ input:focus {
 .modal-body .field > span {
   font-size: 12px;
   color: #c5cad2;
+}
+
+/* Settings modal with left tab nav */
+.modal.settings-modal {
+  width: 680px;
+  max-width: 96vw;
+}
+.modal.settings-modal .modal-body {
+  flex: 1;
+  min-height: 0;
+}
+.modal-tabbed {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+.modal-tabs {
+  border-right: 1px solid #353941;
+  background: #1f2126;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+  gap: 0;
+}
+.modal-tabs .tab {
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  text-align: left;
+  padding: 9px 16px;
+  color: #c5cad2;
+  font-size: 13px;
+  cursor: pointer;
+}
+.modal-tabs .tab:hover:not(.active):not(:disabled) {
+  background: #2a2d33;
+}
+.modal-tabs .tab.active {
+  background: #2f3947;
+  color: #ffffff;
+  font-weight: 600;
+  border-left-color: #3a5cff;
+}
+
+/* Folder labels spacing */
+.folder-labels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.folder-labels .row {
+  margin-top: 10px;
 }
 
 /* Compose */

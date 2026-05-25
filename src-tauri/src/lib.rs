@@ -549,6 +549,16 @@ fn set_download_dir(dir: Option<String>) -> Result<StoredConfig, String> {
 }
 
 #[tauri::command]
+fn get_mark_seen_delay() -> u32 {
+    config::load().mark_seen_delay_seconds
+}
+
+#[tauri::command]
+fn set_mark_seen_delay(seconds: u32) -> Result<StoredConfig, String> {
+    config::set_mark_seen_delay_seconds(seconds).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_flag(
     state: State<'_, AppState>,
     mailbox: String,
@@ -960,6 +970,8 @@ pub fn run() {
             download_attachment,
             get_download_dir,
             set_download_dir,
+            get_mark_seen_delay,
+            set_mark_seen_delay,
             get_folder_labels,
             set_folder_labels,
             open_url,
