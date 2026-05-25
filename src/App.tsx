@@ -1,0 +1,1949 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { EditorContent, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Underline from "@tiptap/extension-underline";
+import Link from "@tiptap/extension-link";
+import * as api from "./api";
+import type {
+  Account,
+  Envelope,
+  Folder,
+  MessageBody,
+  StoredConfig,
+} from "./types";
+import { accountKey, DEFAULT_FOLDER_LABELS } from "./types";
+import type { SpecialUse } from "./types";
+
+interface ComposeAttachment {
+  filename: string;
+  mime: string;
+  data_base64: string;
+  size: number;
+}
+
+interface ComposeDraft {
+  to: string;
+  cc: string;
+  bcc: string;
+  subject: string;
+  body: string;
+  isHtml: boolean;
+  attachments: ComposeAttachment[];
+}
+
+const defaultAccount = (): Account => ({
+  name: "",
+  host: "",
+  port: 993,
+  username: "",
+  smtp_host: "",
+  smtp_port: 465,
+});
+
+export default function App() {
+  const [screen, setScreen] = useState<"login" | "mailbox">("login");
+
+  const [account, setAccount] = useState<Account>(defaultAccount);
+  const [password, setPassword] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState(false);
+
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+  const [envelopes, setEnvelopes] = useState<Envelope[]>([]);
+  const [selectedUid, setSelectedUid] = useState<number | null>(null);
+  const [body, setBody] = useState<MessageBody | null>(null);
+  const [loadingBody, setLoadingBody] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [noMore, setNoMore] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchingServer, setSearchingServer] = useState(false);
+  const [serverResults, setServerResults] = useState<Envelope[] | null>(null);
+
+  async function handleServerSearch() {
+    if (!searchQuery.trim() || !selectedFolder) return;
+    setSearchingServer(true);
+    setStatus(`서버 검색 중: ${searchQuery}…`);
+    try {
+      const results = await api.searchMailbox(selectedFolder, searchQuery, 200);
+      setServerResults(results);
+      setStatus(`서버 검색 결과 ${results.length}건`);
+    } catch (err) {
+      setStatus(`서버 검색 실패: ${err}`);
+    } finally {
+      setSearchingServer(false);
+    }
+  }
+
+  function clearSearch() {
+    setSearchQuery("");
+    setServerResults(null);
+  }
+  const [rootExpanded, setRootExpanded] = useState(true);
+  const [allAccounts, setAllAccounts] = useState<Account[]>([]);
+  const [foldersByAccount, setFoldersByAccount] = useState<
+    Record<string, Folder[]>
+  >({});
+  const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
+  const envelopesRef = useRef<Envelope[]>([]);
+  envelopesRef.current = envelopes;
+  const selectedFolderRef = useRef<string | null>(null);
+  selectedFolderRef.current = selectedFolder;
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const PAGE_SIZE = 50;
+  // How many cached envelopes to load up-front when opening a folder.
+  // Keep generous so previously-fetched messages stay visible across restarts.
+  const CACHED_INITIAL_CAP = 5000;
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null);
+  const [folderLabels, setFolderLabels] = useState<Record<string, string>>(
+    DEFAULT_FOLDER_LABELS,
+  );
+
+  const [promptState, setPromptState] = useState<{
+    title: string;
+    label?: string;
+    defaultValue: string;
+    resolve: (v: string | null) => void;
+  } | null>(null);
+  const [confirmState, setConfirmState] = useState<{
+    message: string;
+    resolve: (v: boolean) => void;
+  } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    folder: Folder | null;
+  } | null>(null);
+
+  function askPrompt(
+    title: string,
+    defaultValue = "",
+    label?: string,
+  ): Promise<string | null> {
+    return new Promise((resolve) =>
+      setPromptState({ title, label, defaultValue, resolve }),
+    );
+  }
+  function askConfirm(message: string): Promise<boolean> {
+    return new Promise((resolve) => setConfirmState({ message, resolve }));
+  }
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    function close(e: MouseEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t && t.closest(".ctx-menu")) return;
+      setCtxMenu(null);
+    }
+    document.addEventListener("mousedown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+    };
+  }, [ctxMenu]);
+
+  useEffect(() => {
+    api
+      .getFolderLabels()
+      .then((labels) =>
+        setFolderLabels({ ...DEFAULT_FOLDER_LABELS, ...labels }),
+      )
+      .catch((e) => console.warn("getFolderLabels failed", e));
+  }, [settingsOpen]);
+
+  function openCompose(draft?: Partial<ComposeDraft>) {
+    setComposeDraft({
+      to: "",
+      cc: "",
+      bcc: "",
+      subject: "",
+      body: "",
+      isHtml: false,
+      attachments: [],
+      ...(draft || {}),
+    });
+  }
+
+  function openReply(b: MessageBody) {
+    const subject = b.subject.startsWith("Re:") ? b.subject : `Re: ${b.subject}`;
+    const fromEsc = escapeHtml(b.from);
+    const dateEsc = escapeHtml(b.date);
+    const originalHtml = b.html ?? plainToHtml(b.text);
+    const body = `<p><br/></p><p>${dateEsc}, ${fromEsc} wrote:</p><blockquote>${originalHtml}</blockquote>`;
+    openCompose({
+      to: b.from,
+      subject,
+      body,
+      isHtml: true,
+    });
+  }
+
+  async function startWithAccount(acc: Account) {
+    setAccount(acc);
+    const pw = await api.loadPassword(acc);
+    try {
+      const cachedF = await api.cachedFolders(acc);
+      if (cachedF.length > 0) {
+        setFolders(cachedF);
+        setExpanded(
+          new Set(cachedF.filter((f) => f.has_children).map((f) => f.raw)),
+        );
+        setScreen("mailbox");
+        setStatus(`Cached · ${cachedF.length} folders · reconnecting…`);
+      }
+    } catch (e) {
+      console.warn("cachedFolders failed", e);
+    }
+    if (pw) {
+      setPassword(pw);
+      try {
+        setConnecting(true);
+        const fs = await api.connectImap(acc.host, acc.port, acc.username, pw);
+        setFolders(fs);
+        setExpanded(
+          new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
+        );
+        setScreen("mailbox");
+        setStatus(`Connected · ${fs.length} folders`);
+      } catch (err) {
+        setStatus(`Auto-connect failed: ${err}`);
+        setError(true);
+      } finally {
+        setConnecting(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    (async () => {
+      const cur = await api.currentAccount();
+      if (cur) {
+        await startWithAccount(cur);
+      }
+      await refreshAllAccountFolders();
+    })().catch((e) => console.error("init failed", e));
+  }, []);
+
+  // Sync the multi-account folder cache with active account changes
+  // and folder updates so non-current account trees stay reasonably fresh.
+  useEffect(() => {
+    if (folders.length === 0) return;
+    const key = accountKey(account);
+    setFoldersByAccount((prev) => ({ ...prev, [key]: folders }));
+  }, [folders, account]);
+
+  // Refresh the multi-account list whenever Settings closes (user may
+  // have added/edited/removed accounts).
+  useEffect(() => {
+    if (!settingsOpen) refreshAllAccountFolders().catch(() => {});
+  }, [settingsOpen]);
+
+  async function refreshAllAccountFolders() {
+    try {
+      const cfg = await api.listAccounts();
+      setAllAccounts(cfg.accounts);
+      const map: Record<string, Folder[]> = {};
+      for (const a of cfg.accounts) {
+        try {
+          const fs = await api.cachedFolders(a);
+          map[accountKey(a)] = fs;
+        } catch (e) {
+          console.warn("cachedFolders failed for", a, e);
+          map[accountKey(a)] = [];
+        }
+      }
+      setFoldersByAccount(map);
+      // Expand current account root by default
+      if (cfg.current_key) {
+        setExpandedRoots((prev) => {
+          const next = new Set(prev);
+          next.add(cfg.current_key!);
+          return next;
+        });
+      }
+    } catch (e) {
+      console.warn("refreshAllAccountFolders failed", e);
+    }
+  }
+
+  useEffect(() => {
+    function onMessage(ev: MessageEvent) {
+      const data = ev.data;
+      if (
+        data &&
+        typeof data === "object" &&
+        data.type === "manty-open-link" &&
+        typeof data.url === "string"
+      ) {
+        api.openUrl(data.url).catch((e) => console.warn("open_url failed", e));
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen("settings:open", () => {
+      setSettingsOpen(true);
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<Folder[]>("folders:changed", (event) => {
+      setFolders(event.payload);
+      setExpanded((prev) => {
+        // Keep previously-expanded entries that still exist; auto-expand
+        // any new parent nodes so the new folders are visible.
+        const valid = new Set(event.payload.map((f) => f.raw));
+        const next = new Set<string>();
+        prev.forEach((p) => {
+          if (valid.has(p)) next.add(p);
+        });
+        event.payload.forEach((f) => {
+          if (f.has_children) next.add(f.raw);
+        });
+        return next;
+      });
+      setStatus("폴더 목록 갱신");
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<{ mailbox: string }>(
+      "mail:new",
+      async (event) => {
+        const mb = event.payload.mailbox;
+        if (selectedFolderRef.current !== mb) return;
+        try {
+          const envs = await api.fetchEnvelopes(mb, 0, PAGE_SIZE);
+          let total = 0;
+          setEnvelopes((prev) => {
+            const merged = mergeEnvelopes(envs, prev);
+            total = merged.length;
+            return merged;
+          });
+          setStatus(`${total} messages · 새 메일 도착`);
+        } catch (e) {
+          console.warn("mail:new refetch failed", e);
+        }
+      },
+    );
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen(true);
+      } else if (e.key === "Escape" && settingsOpen) {
+        setSettingsOpen(false);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [settingsOpen]);
+
+  async function handleConnect(e: React.FormEvent) {
+    e.preventDefault();
+    if (!account.host || !account.username || !password) {
+      setStatus("host/port/username/password를 모두 입력하세요");
+      setError(true);
+      return;
+    }
+    setConnecting(true);
+    setError(false);
+    setStatus("Connecting…");
+    try {
+      const fs = await api.connectImap(
+        account.host,
+        account.port,
+        account.username,
+        password,
+      );
+      await api.upsertAccount(account);
+      await api.setCurrentAccount(account);
+      await api.savePassword(account, password);
+      setFolders(fs);
+      setExpanded(
+        new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
+      );
+      setStatus(`Connected · ${fs.length} folders`);
+      setScreen("mailbox");
+    } catch (err) {
+      setStatus(`Connect failed: ${err}`);
+      setError(true);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function handleSelectFolder(folder: Folder) {
+    setSelectedFolder(folder.raw);
+    setBody(null);
+    setSelectedUid(null);
+    setEnvelopes([]);
+    setNoMore(false);
+    setServerResults(null);
+    setStatus(`Loading ${folder.leaf}…`);
+
+    try {
+      // Load all cached envelopes so the user sees the full backlog
+      // they previously scrolled to, not just the newest page.
+      const cachedE = await api.cachedEnvelopes(
+        account,
+        folder.raw,
+        null,
+        CACHED_INITIAL_CAP,
+      );
+      setEnvelopes(cachedE);
+    } catch (e) {
+      console.warn("cachedEnvelopes failed", e);
+    }
+
+    try {
+      const envs = await api.fetchEnvelopes(folder.raw, 0, PAGE_SIZE);
+      let total = 0;
+      setEnvelopes((prev) => {
+        const merged = mergeEnvelopes(envs, prev);
+        total = merged.length;
+        return merged;
+      });
+      setStatus(`${total} messages`);
+      if (envs.length < PAGE_SIZE) setNoMore(true);
+    } catch (err) {
+      setStatus(`Fetch failed: ${err}`);
+    }
+  }
+
+  async function loadMore() {
+    const folder = selectedFolderRef.current;
+    if (!folder || loadingMore || noMore) return;
+    setLoadingMore(true);
+    const current = envelopesRef.current;
+    const oldestUid = current.length > 0 ? current[current.length - 1].uid : null;
+
+    // Cached page below oldest
+    try {
+      const cachedE = await api.cachedEnvelopes(
+        account,
+        folder,
+        oldestUid,
+        PAGE_SIZE,
+      );
+      if (cachedE.length > 0) {
+        setEnvelopes((prev) => mergeEnvelopes(prev, cachedE));
+      }
+    } catch (e) {
+      console.warn("cachedEnvelopes (more) failed", e);
+    }
+
+    // Live page
+    try {
+      const offset = envelopesRef.current.length;
+      const envs = await api.fetchEnvelopes(folder, offset, PAGE_SIZE);
+      if (envs.length === 0) {
+        setNoMore(true);
+      } else {
+        let total = 0;
+        setEnvelopes((prev) => {
+          const merged = mergeEnvelopes(prev, envs);
+          total = merged.length;
+          return merged;
+        });
+        setStatus(`${total} messages`);
+        if (envs.length < PAGE_SIZE) setNoMore(true);
+      }
+    } catch (err) {
+      console.warn("fetchEnvelopes (more) failed", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!sentinelRef.current) return;
+    const sentinel = sentinelRef.current;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          loadMore();
+        }
+      },
+      { root: null, rootMargin: "120px", threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [selectedFolder, loadingMore, noMore, account]);
+
+  async function handleSelectMessage(uid: number) {
+    setSelectedUid(uid);
+    setBody(null);
+    setLoadingBody(true);
+    if (selectedFolder) {
+      try {
+        const cached = await api.cachedBody(account, selectedFolder, uid);
+        if (cached) {
+          setBody(cached);
+          setLoadingBody(false);
+        }
+      } catch (e) {
+        console.warn("cachedBody failed", e);
+      }
+    }
+    if (!selectedFolder) {
+      setLoadingBody(false);
+      return;
+    }
+    try {
+      const b = await api.fetchBody(selectedFolder, uid);
+      setBody(b);
+    } catch (err) {
+      setStatus(`Body fetch failed: ${err}`);
+    } finally {
+      setLoadingBody(false);
+    }
+    try {
+      const target = envelopes.find((e) => e.uid === uid);
+      const wasUnread = target && !target.seen;
+      const newFlags = await api.markSeen(selectedFolder, uid, true);
+      setEnvelopes((prev) =>
+        prev.map((e) =>
+          e.uid === uid ? { ...e, flags: newFlags, seen: true } : e,
+        ),
+      );
+      if (wasUnread) {
+        setFolders((prev) =>
+          prev.map((f) =>
+            f.raw === selectedFolder
+              ? { ...f, unread_count: Math.max(0, f.unread_count - 1) }
+              : f,
+          ),
+        );
+      }
+    } catch (err) {
+      console.warn("markSeen failed", err);
+    }
+  }
+
+  function toggleFolder(raw: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(raw)) next.delete(raw);
+      else next.add(raw);
+      return next;
+    });
+  }
+
+  async function handleCreateMailbox(parent?: Folder) {
+    const title = parent
+      ? `${parent.leaf} 안에 새 하위 폴더`
+      : "새 폴더";
+    const name = await askPrompt(title, "", "폴더 이름");
+    if (!name) return;
+    try {
+      const fs = await api.createMailbox(name, parent?.raw ?? null);
+      setFolders(fs);
+      setStatus(`폴더 생성: ${name}`);
+    } catch (err) {
+      setStatus(`폴더 생성 실패: ${err}`);
+    }
+  }
+
+  async function handleRenameMailbox(folder: Folder) {
+    const newLeaf = await askPrompt("폴더 이름 변경", folder.leaf, "새 이름");
+    if (!newLeaf || newLeaf === folder.leaf) return;
+    try {
+      const fs = await api.renameMailbox(folder.raw, newLeaf);
+      setFolders(fs);
+      setStatus(`이름 변경: ${folder.leaf} → ${newLeaf}`);
+    } catch (err) {
+      setStatus(`이름 변경 실패: ${err}`);
+    }
+  }
+
+  async function handleDeleteMailbox(folder: Folder) {
+    const ok = await askConfirm(
+      `'${folder.leaf}' 폴더를 삭제할까요?\n안의 메일이 모두 사라집니다.`,
+    );
+    if (!ok) return;
+    try {
+      const fs = await api.deleteMailbox(folder.raw);
+      setFolders(fs);
+      if (selectedFolder === folder.raw) {
+        setSelectedFolder(null);
+        setEnvelopes([]);
+        setBody(null);
+        setSelectedUid(null);
+      }
+      setStatus(`삭제: ${folder.leaf}`);
+    } catch (err) {
+      setStatus(`삭제 실패: ${err}`);
+    }
+  }
+
+  async function handleToggleFlag(uid: number) {
+    if (!selectedFolder) return;
+    const env = envelopes.find((e) => e.uid === uid);
+    const isFlagged = env?.flags.some((f) => f.toLowerCase() === "\\flagged") ?? false;
+    try {
+      const newFlags = await api.setFlag(selectedFolder, uid, "\\Flagged", !isFlagged);
+      setEnvelopes((prev) =>
+        prev.map((e) =>
+          e.uid === uid
+            ? {
+                ...e,
+                flags: newFlags,
+                seen: newFlags.some((f) => f.toLowerCase() === "\\seen"),
+              }
+            : e,
+        ),
+      );
+    } catch (err) {
+      setStatus(`플래그 설정 실패: ${err}`);
+    }
+  }
+
+  async function handleMoveToTrash(uid: number) {
+    if (!selectedFolder) return;
+    const ok = await askConfirm("이 메일을 휴지통으로 옮길까요?");
+    if (!ok) return;
+    try {
+      await api.moveToTrash(selectedFolder, uid);
+      setEnvelopes((prev) => prev.filter((e) => e.uid !== uid));
+      if (selectedUid === uid) {
+        setBody(null);
+        setSelectedUid(null);
+      }
+      setStatus("휴지통으로 이동");
+    } catch (err) {
+      setStatus(`삭제 실패: ${err}`);
+    }
+  }
+
+  async function handleSubscribe(folder: Folder) {
+    try {
+      const fs = await api.subscribeMailbox(folder.raw);
+      setFolders(fs);
+      setStatus(`구독: ${folder.leaf}`);
+    } catch (err) {
+      setStatus(`구독 실패: ${err}`);
+    }
+  }
+
+  async function handleUnsubscribe(folder: Folder) {
+    try {
+      const fs = await api.unsubscribeMailbox(folder.raw);
+      setFolders(fs);
+      setStatus(`구독 해제: ${folder.leaf}`);
+    } catch (err) {
+      setStatus(`구독 해제 실패: ${err}`);
+    }
+  }
+
+  async function handleSwitchAccount(target: Account) {
+    setSettingsOpen(false);
+    try {
+      await api.disconnectImap();
+    } catch (e) {
+      console.warn("disconnect on switch failed", e);
+    }
+    await api.setCurrentAccount(target);
+    setFolders([]);
+    setExpanded(new Set());
+    setEnvelopes([]);
+    setSelectedFolder(null);
+    setSelectedUid(null);
+    setBody(null);
+    setScreen("login");
+    setPassword("");
+    await startWithAccount(target);
+  }
+
+  function toggleRootExpand(key: string) {
+    setExpandedRoots((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function emailOf(a: Account): string {
+    return a.username.includes("@") ? a.username : `${a.username}@${a.host}`;
+  }
+
+  function filterVisibleFolders(list: Folder[]): Folder[] {
+    const byPath = new Map(list.map((f) => [f.raw, f]));
+    return list.filter((f) => {
+      let p = f.parent_path;
+      while (p) {
+        if (!expanded.has(p)) return false;
+        p = byPath.get(p)?.parent_path ?? null;
+      }
+      return true;
+    });
+  }
+
+  function renderFolderRow(
+    f: Folder,
+    idx: number,
+    visible: Folder[],
+    owner: Account,
+    isCurrent: boolean,
+  ) {
+    const locked = f.special !== "Other";
+    const prev = idx > 0 ? visible[idx - 1] : null;
+    const showSeparator =
+      prev && prev.special !== "Other" && f.special === "Other";
+    const folderEl = (
+      <div
+        key={f.raw}
+        className={`folder ${selectedFolder === f.raw && isCurrent ? "selected" : ""} ${f.subscribed ? "" : "unsubscribed"} ${f.unread_count > 0 ? "has-unread" : ""}`}
+        style={{ paddingLeft: 8 + f.depth * 14 }}
+        onClick={async () => {
+          if (!isCurrent) {
+            await handleSwitchAccount(owner);
+            return;
+          }
+          handleSelectFolder(f);
+        }}
+        onContextMenu={(e) => {
+          if (!isCurrent) return;
+          e.preventDefault();
+          setCtxMenu({ x: e.clientX, y: e.clientY, folder: f });
+        }}
+      >
+        <span
+          className={`toggle ${f.has_children ? "clickable" : ""}`}
+          onClick={(e) => {
+            if (!f.has_children) return;
+            e.stopPropagation();
+            toggleFolder(f.raw);
+          }}
+        >
+          {f.has_children ? (expanded.has(f.raw) ? "▼" : "▶") : ""}
+        </span>
+        <span className="leaf">
+          {locked && folderLabels[f.special]
+            ? folderLabels[f.special]
+            : f.leaf}
+        </span>
+        {f.unread_count > 0 && (
+          <span className="unread-count">{f.unread_count}</span>
+        )}
+        {locked && f.special !== "Inbox" && (
+          <span className="badge">{f.special}</span>
+        )}
+      </div>
+    );
+    if (showSeparator) {
+      return (
+        <div key={`sep-${f.raw}`} className="folder-separator">
+          {folderEl}
+        </div>
+      );
+    }
+    return folderEl;
+  }
+
+  function renderAccountTrees() {
+    const currentKey = accountKey(account);
+    const accountsList =
+      allAccounts.length > 0
+        ? allAccounts
+        : account.host
+          ? [account]
+          : [];
+    return accountsList.map((acc) => {
+      const aKey = accountKey(acc);
+      const isCurrent = aKey === currentKey;
+      const accFolders = isCurrent
+        ? folders
+        : foldersByAccount[aKey] ?? [];
+      const isRootExpanded = expandedRoots.has(aKey);
+      const visible = isCurrent
+        ? filterVisibleFolders(accFolders)
+        : accFolders;
+      return (
+        <div key={aKey}>
+          <div
+            className={`folder folder-root ${isCurrent ? "active-root" : ""}`}
+            onClick={() => toggleRootExpand(aKey)}
+            onContextMenu={(e) => {
+              if (!isCurrent) return;
+              e.preventDefault();
+              setCtxMenu({ x: e.clientX, y: e.clientY, folder: null });
+            }}
+            title={
+              isCurrent
+                ? "클릭하여 펼치기/접기, 우클릭하여 메뉴"
+                : "클릭하여 펼치기/접기"
+            }
+          >
+            <span className="root-icon">{isRootExpanded ? "▾" : "▸"}</span>
+            <span className="leaf">
+              {acc.name ? (
+                <>
+                  {acc.name}{" "}
+                  <span className="root-email">({emailOf(acc)})</span>
+                </>
+              ) : (
+                emailOf(acc)
+              )}
+            </span>
+          </div>
+          {isRootExpanded &&
+            visible.map((f, idx) =>
+              renderFolderRow(f, idx, visible, acc, isCurrent),
+            )}
+        </div>
+      );
+    });
+  }
+
+  const visibleFolders = useMemo(() => {
+    const byPath = new Map(folders.map((f) => [f.raw, f]));
+    return folders.filter((f) => {
+      let p = f.parent_path;
+      while (p) {
+        if (!expanded.has(p)) return false;
+        p = byPath.get(p)?.parent_path ?? null;
+      }
+      return true;
+    });
+  }, [folders, expanded]);
+
+  return (
+    <>
+      {screen === "login" ? (
+        <div className="login">
+          <form onSubmit={handleConnect}>
+            <h1>Mantybird</h1>
+            <p className="sub">Add an IMAP account</p>
+            <input
+              placeholder="Account name (optional)"
+              value={account.name}
+              onChange={(e) =>
+                setAccount({ ...account, name: e.target.value })
+              }
+            />
+            <input
+              placeholder="Host (e.g. imap.gmail.com)"
+              value={account.host}
+              onChange={(e) =>
+                setAccount({ ...account, host: e.target.value })
+              }
+            />
+            <input
+              placeholder="Port"
+              value={account.port}
+              onChange={(e) =>
+                setAccount({ ...account, port: Number(e.target.value) || 0 })
+              }
+            />
+            <input
+              placeholder="Username"
+              value={account.username}
+              onChange={(e) =>
+                setAccount({ ...account, username: e.target.value })
+              }
+            />
+            <input
+              placeholder="Password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <button type="submit" disabled={connecting}>
+              {connecting ? "Connecting…" : "Connect"}
+            </button>
+            <div className={`status ${error ? "error" : ""}`}>{status}</div>
+            <p className="sub">⌘, to open settings</p>
+          </form>
+        </div>
+      ) : (
+        <div className="mailbox">
+          <header className="topbar">
+            <button
+              className="primary"
+              title="새 메일"
+              onClick={() => openCompose()}
+            >
+              새 메일
+            </button>
+            <span className="who">
+              {account.name || `${account.username}@${account.host}`}
+            </span>
+            <span className="spacer" />
+            <input
+              className="search-input"
+              placeholder="제목 / 보낸이 검색"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (serverResults) setServerResults(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleServerSearch();
+              }}
+            />
+            <button
+              onClick={handleServerSearch}
+              disabled={
+                !searchQuery.trim() || !selectedFolder || searchingServer
+              }
+              title="서버에서 검색 (제목/본문/보낸이/받는이)"
+            >
+              {searchingServer ? "검색 중…" : "서버 검색"}
+            </button>
+            {(searchQuery || serverResults) && (
+              <button onClick={clearSearch} title="검색 해제">
+                ✕
+              </button>
+            )}
+          </header>
+          <div className="panes">
+            <div className="pane">
+              {renderAccountTrees()}
+            </div>
+            <div className="pane">
+              {(serverResults
+                ? serverResults
+                : searchQuery
+                  ? envelopes.filter((e) => {
+                      const q = searchQuery.toLowerCase();
+                      return (
+                        e.subject.toLowerCase().includes(q) ||
+                        e.from.toLowerCase().includes(q)
+                      );
+                    })
+                  : envelopes
+              ).map((e) => (
+                <div
+                  key={e.uid}
+                  className={`envelope ${selectedUid === e.uid ? "selected" : ""} ${e.seen ? "" : "unread"}`}
+                  onClick={() => handleSelectMessage(e.uid)}
+                >
+                  <div className="subject">
+                    {!e.seen && <span className="dot" />}
+                    {e.flags.some((f) => f.toLowerCase() === "\\flagged") && (
+                      <span className="star" title="중요">
+                        ★
+                      </span>
+                    )}
+                    {e.subject}
+                  </div>
+                  <div className="meta">{e.from}</div>
+                  <div className="meta">{e.date}</div>
+                </div>
+              ))}
+              <div ref={sentinelRef} className="sentinel">
+                {loadingMore
+                  ? "더 불러오는 중…"
+                  : noMore
+                    ? envelopes.length > 0
+                      ? "끝"
+                      : ""
+                    : ""}
+              </div>
+            </div>
+            <div className="pane viewer">
+              {loadingBody ? (
+                <div className="empty">Loading…</div>
+              ) : body ? (
+                <>
+                  <div className="viewer-head">
+                    <h2>{body.subject}</h2>
+                    <div className="viewer-actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          selectedUid !== null && handleToggleFlag(selectedUid)
+                        }
+                        title="중요 표시"
+                      >
+                        {envelopes
+                          .find((e) => e.uid === selectedUid)
+                          ?.flags.some((f) => f.toLowerCase() === "\\flagged")
+                          ? "★ 중요"
+                          : "☆ 중요"}
+                      </button>
+                      <button onClick={() => openReply(body)}>답장</button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          selectedUid !== null && handleMoveToTrash(selectedUid)
+                        }
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </div>
+                  <div className="headers">
+                    <div>From: {body.from}</div>
+                    <div>To: {body.to}</div>
+                    <div>Date: {body.date}</div>
+                  </div>
+                  {body.attachments.length > 0 &&
+                    selectedUid !== null &&
+                    selectedFolder && (
+                      <AttachmentList
+                        mailbox={selectedFolder}
+                        uid={selectedUid}
+                        attachments={body.attachments}
+                      />
+                    )}
+                  {body.html ? (
+                    <iframe
+                      className="html"
+                      sandbox="allow-scripts"
+                      srcDoc={wrapHtml(body.subject, body.html)}
+                      title="message body"
+                    />
+                  ) : (
+                    <pre className="text">{body.text}</pre>
+                  )}
+                </>
+              ) : (
+                <div className="empty">Select a message</div>
+              )}
+            </div>
+          </div>
+          <footer className="status">{status}</footer>
+        </div>
+      )}
+      {settingsOpen && (
+        <SettingsModal
+          currentAccount={account}
+          onClose={() => setSettingsOpen(false)}
+          onSwitch={handleSwitchAccount}
+        />
+      )}
+      {composeDraft && (
+        <ComposeModal
+          draft={composeDraft}
+          onChange={setComposeDraft}
+          onClose={() => setComposeDraft(null)}
+        />
+      )}
+      {promptState && (
+        <PromptDialog
+          title={promptState.title}
+          label={promptState.label}
+          defaultValue={promptState.defaultValue}
+          onSubmit={(v) => {
+            const r = promptState.resolve;
+            setPromptState(null);
+            r(v);
+          }}
+        />
+      )}
+      {confirmState && (
+        <ConfirmDialog
+          message={confirmState.message}
+          onAnswer={(v) => {
+            const r = confirmState.resolve;
+            setConfirmState(null);
+            r(v);
+          }}
+        />
+      )}
+      {ctxMenu && (
+        <FolderContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          folder={ctxMenu.folder}
+          onNewChild={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            handleCreateMailbox(f ?? undefined);
+          }}
+          onRename={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleRenameMailbox(f);
+          }}
+          onDelete={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleDeleteMailbox(f);
+          }}
+          onSubscribe={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleSubscribe(f);
+          }}
+          onUnsubscribe={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleUnsubscribe(f);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function SettingsModal(props: {
+  currentAccount: Account;
+  onClose: () => void;
+  onSwitch: (acc: Account) => Promise<void>;
+}) {
+  const [config, setConfig] = useState<StoredConfig | null>(null);
+  const [editing, setEditing] = useState<Account | null>(null);
+  const [editPassword, setEditPassword] = useState("");
+  const [isNew, setIsNew] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function refresh() {
+    const c = await api.listAccounts();
+    setConfig(c);
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => console.error("list_accounts failed", e));
+  }, []);
+
+  function openAdd() {
+    setIsNew(true);
+    setEditing(defaultAccount());
+    setEditPassword("");
+    setMsg("");
+  }
+  function openEdit(acc: Account) {
+    setIsNew(false);
+    setEditing(acc);
+    api.loadPassword(acc).then((pw) => setEditPassword(pw || ""));
+    setMsg("");
+  }
+  function closeEdit() {
+    setEditing(null);
+    setEditPassword("");
+    setMsg("");
+  }
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editing) return;
+    if (!editing.host || !editing.username || !editPassword) {
+      setMsg("host/username/password 필수");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.upsertAccount(editing);
+      await api.savePassword(editing, editPassword);
+      await refresh();
+      closeEdit();
+    } catch (err) {
+      setMsg(`Save failed: ${err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(acc: Account) {
+    if (!confirm(`삭제: ${acc.name || accountKey(acc)}?`)) return;
+    setBusy(true);
+    try {
+      await api.deleteAccount(acc);
+      await refresh();
+    } catch (err) {
+      setMsg(`Delete failed: ${err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <header className="modal-header">
+          <h2>Settings · Accounts</h2>
+          <button onClick={props.onClose}>✕</button>
+        </header>
+        {editing ? (
+          <form className="modal-body" onSubmit={handleSave}>
+            <h3>{isNew ? "Add account" : "Edit account"}</h3>
+            <input
+              placeholder="Account name (optional)"
+              value={editing.name}
+              onChange={(e) =>
+                setEditing({ ...editing, name: e.target.value })
+              }
+            />
+            <input
+              placeholder="Host"
+              value={editing.host}
+              onChange={(e) =>
+                setEditing({ ...editing, host: e.target.value })
+              }
+            />
+            <input
+              placeholder="Port"
+              value={editing.port}
+              onChange={(e) =>
+                setEditing({
+                  ...editing,
+                  port: Number(e.target.value) || 0,
+                })
+              }
+            />
+            <input
+              placeholder="Username"
+              value={editing.username}
+              onChange={(e) =>
+                setEditing({ ...editing, username: e.target.value })
+              }
+            />
+            <input
+              placeholder="SMTP host (e.g. smtp.gmail.com) — for sending mail"
+              value={editing.smtp_host}
+              onChange={(e) =>
+                setEditing({ ...editing, smtp_host: e.target.value })
+              }
+            />
+            <input
+              placeholder="SMTP port (465 = SSL, 587 = STARTTLS)"
+              value={editing.smtp_port}
+              onChange={(e) =>
+                setEditing({
+                  ...editing,
+                  smtp_port: Number(e.target.value) || 0,
+                })
+              }
+            />
+            <input
+              placeholder="Password"
+              type="password"
+              value={editPassword}
+              onChange={(e) => setEditPassword(e.target.value)}
+            />
+            {msg && <div className="status error">{msg}</div>}
+            <div className="row">
+              <button type="submit" disabled={busy}>
+                Save
+              </button>
+              <button type="button" onClick={closeEdit} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="modal-body">
+            <div className="account-list">
+              {(config?.accounts || []).map((a) => {
+                const isCurrent =
+                  config?.current_key === accountKey(a);
+                return (
+                  <div className="account-row" key={accountKey(a)}>
+                    <div className="info">
+                      <div className="name">
+                        {a.name || accountKey(a)}
+                        {isCurrent && <span className="badge">현재</span>}
+                      </div>
+                      <div className="key">{accountKey(a)}</div>
+                    </div>
+                    <div className="actions">
+                      {!isCurrent && (
+                        <button
+                          onClick={() => props.onSwitch(a)}
+                          disabled={busy}
+                        >
+                          Switch
+                        </button>
+                      )}
+                      <button onClick={() => openEdit(a)} disabled={busy}>
+                        Edit
+                      </button>
+                      <button onClick={() => handleDelete(a)} disabled={busy}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              {(config?.accounts || []).length === 0 && (
+                <div className="empty">No accounts</div>
+              )}
+            </div>
+            <button onClick={openAdd}>+ Add account</button>
+            <hr className="modal-divider" />
+            <h3>환경설정</h3>
+            <label className="field">
+              <span>다운로드 폴더</span>
+              <input
+                placeholder="비워두면 ~/Downloads (브라우저 기본)"
+                value={config?.download_dir ?? ""}
+                onChange={(e) =>
+                  setConfig((prev) =>
+                    prev
+                      ? { ...prev, download_dir: e.target.value || null }
+                      : prev,
+                  )
+                }
+              />
+            </label>
+            <div className="row">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const c = await api.setDownloadDir(
+                      config?.download_dir || null,
+                    );
+                    setConfig(c);
+                    setMsg("저장됨");
+                  } catch (e) {
+                    setMsg(`저장 실패: ${e}`);
+                  }
+                }}
+                disabled={busy}
+              >
+                저장
+              </button>
+            </div>
+            <hr className="modal-divider" />
+            <h3>폴더 라벨</h3>
+            <p className="sub">
+              특수 용도 폴더(RFC 6154 \Sent, \Drafts 등) 화면 표시 이름.
+              IMAP 통신에는 영향 없음.
+            </p>
+            <FolderLabelsEditor />
+            {msg && (
+              <div
+                className={`status ${msg.includes("실패") ? "error" : "success"}`}
+              >
+                {msg}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ComposeModal(props: {
+  draft: ComposeDraft;
+  onChange: (d: ComposeDraft) => void;
+  onClose: () => void;
+}) {
+  const { draft, onChange } = props;
+  const [sending, setSending] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function handleSend(e: React.FormEvent) {
+    e.preventDefault();
+    setSending(true);
+    setMsg("Sending…");
+    try {
+      const html = draft.isHtml ? draft.body : null;
+      const text = draft.isHtml ? stripHtml(draft.body) : draft.body;
+      await api.sendMail({
+        to: draft.to,
+        cc: draft.cc,
+        bcc: draft.bcc,
+        subject: draft.subject,
+        body: text,
+        html,
+        attachments: draft.attachments.map((a) => ({
+          filename: a.filename,
+          mime: a.mime,
+          data_base64: a.data_base64,
+        })),
+      });
+      props.onClose();
+    } catch (err) {
+      setMsg(`Send failed: ${err}`);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleAttachFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const additions: ComposeAttachment[] = [];
+    for (const file of Array.from(files)) {
+      const buffer = await file.arrayBuffer();
+      additions.push({
+        filename: file.name,
+        mime: file.type || "application/octet-stream",
+        data_base64: arrayBufferToBase64(buffer),
+        size: file.size,
+      });
+    }
+    onChange({ ...draft, attachments: [...draft.attachments, ...additions] });
+  }
+
+  function removeAttachment(i: number) {
+    onChange({
+      ...draft,
+      attachments: draft.attachments.filter((_, j) => j !== i),
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal compose" onClick={(e) => e.stopPropagation()}>
+        <header className="modal-header">
+          <h2>새 메일</h2>
+          <button onClick={props.onClose}>닫기</button>
+        </header>
+        <form className="modal-body" onSubmit={handleSend}>
+          <input
+            placeholder="To (콤마로 여러 명)"
+            value={draft.to}
+            onChange={(e) => onChange({ ...draft, to: e.target.value })}
+          />
+          <input
+            placeholder="Cc"
+            value={draft.cc}
+            onChange={(e) => onChange({ ...draft, cc: e.target.value })}
+          />
+          <input
+            placeholder="Bcc"
+            value={draft.bcc}
+            onChange={(e) => onChange({ ...draft, bcc: e.target.value })}
+          />
+          <input
+            placeholder="Subject"
+            value={draft.subject}
+            onChange={(e) => onChange({ ...draft, subject: e.target.value })}
+          />
+          <div className="compose-toolbar">
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.isHtml}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  const body = next
+                    ? plainToHtml(draft.body)
+                    : stripHtml(draft.body);
+                  onChange({ ...draft, isHtml: next, body });
+                }}
+              />{" "}
+              HTML 본문
+            </label>
+            <label className="file-attach">
+              파일 첨부
+              <input
+                type="file"
+                multiple
+                onChange={(e) => {
+                  handleAttachFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+          {draft.attachments.length > 0 && (
+            <div className="attachments">
+              {draft.attachments.map((a, i) => (
+                <div className="attachment" key={`${a.filename}-${i}`}>
+                  <span className="file">
+                    {a.filename}{" "}
+                    <span className="size">({formatBytes(a.size)})</span>
+                  </span>
+                  <button type="button" onClick={() => removeAttachment(i)}>
+                    삭제
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {draft.isHtml ? (
+            <RichEditor
+              value={draft.body}
+              onChange={(html) => onChange({ ...draft, body: html })}
+            />
+          ) : (
+            <textarea
+              placeholder="본문"
+              rows={14}
+              value={draft.body}
+              onChange={(e) => onChange({ ...draft, body: e.target.value })}
+            />
+          )}
+          {msg && (
+            <div
+              className={`status ${msg.startsWith("Send failed") ? "error" : ""}`}
+            >
+              {msg}
+            </div>
+          )}
+          <div className="row">
+            <button type="submit" disabled={sending}>
+              {sending ? "Sending…" : "Send"}
+            </button>
+            <button type="button" onClick={props.onClose} disabled={sending}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function AttachmentList(props: {
+  mailbox: string;
+  uid: number;
+  attachments: import("./types").AttachmentMeta[];
+}) {
+  const [busy, setBusy] = useState<number | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [doneMsg, setDoneMsg] = useState("");
+
+  async function download(index: number) {
+    setBusy(index);
+    setErrorMsg("");
+    setDoneMsg("");
+    try {
+      const r = await api.downloadAttachment(props.mailbox, props.uid, index);
+      if (r.saved_path) {
+        setDoneMsg(`다운로드 완료 · ${r.saved_path}`);
+        api
+          .revealInFileManager(r.saved_path)
+          .catch((e) => console.warn("reveal failed", e));
+      } else {
+        saveDownload(r.filename, r.mime, r.data_base64);
+        setDoneMsg(`다운로드 완료 · ${r.filename} (~/Downloads)`);
+      }
+      setTimeout(() => setDoneMsg(""), 5000);
+    } catch (err) {
+      console.error("download failed", err);
+      setErrorMsg(`다운로드 실패: ${err}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <div className="attachments view">
+      <div className="label">첨부파일 ({props.attachments.length})</div>
+      {props.attachments.map((a) => (
+        <div className="attachment" key={a.index}>
+          <span className="file">
+            {a.filename}{" "}
+            <span className="size">({formatBytes(a.size)})</span>
+          </span>
+          <button onClick={() => download(a.index)} disabled={busy === a.index}>
+            {busy === a.index
+              ? `받는 중 ${formatBytes(a.size)}…`
+              : "다운로드"}
+          </button>
+        </div>
+      ))}
+      {doneMsg && <div className="status success">{doneMsg}</div>}
+      {errorMsg && <div className="status error">{errorMsg}</div>}
+    </div>
+  );
+}
+
+function PromptDialog(props: {
+  title: string;
+  label?: string;
+  defaultValue: string;
+  onSubmit: (value: string | null) => void;
+}) {
+  const [value, setValue] = useState(props.defaultValue);
+  return (
+    <div className="modal-backdrop" onClick={() => props.onSubmit(null)}>
+      <div
+        className="modal"
+        style={{ width: 380 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="modal-header">
+          <h2>{props.title}</h2>
+        </header>
+        <form
+          className="modal-body"
+          onSubmit={(e) => {
+            e.preventDefault();
+            props.onSubmit(value);
+          }}
+        >
+          {props.label && (
+            <label className="field">
+              <span>{props.label}</span>
+            </label>
+          )}
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <div className="row">
+            <button type="submit">확인</button>
+            <button type="button" onClick={() => props.onSubmit(null)}>
+              취소
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog(props: {
+  message: string;
+  onAnswer: (yes: boolean) => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={() => props.onAnswer(false)}>
+      <div
+        className="modal"
+        style={{ width: 380 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-body">
+          <div style={{ whiteSpace: "pre-wrap" }}>{props.message}</div>
+          <div className="row">
+            <button autoFocus onClick={() => props.onAnswer(true)}>
+              확인
+            </button>
+            <button onClick={() => props.onAnswer(false)}>취소</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FolderContextMenu(props: {
+  x: number;
+  y: number;
+  folder: Folder | null;
+  onNewChild: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  onSubscribe: () => void;
+  onUnsubscribe: () => void;
+}) {
+  const isRoot = props.folder === null;
+  const locked = !isRoot && props.folder!.special !== "Other";
+  return (
+    <div
+      className="ctx-menu"
+      style={{ left: props.x, top: props.y }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      <button onClick={props.onNewChild}>
+        {isRoot ? "새 폴더" : "새 하위 폴더"}
+      </button>
+      {!isRoot && (
+        <>
+          <button onClick={props.onRename} disabled={locked}>
+            이름 변경
+          </button>
+          <button onClick={props.onDelete} disabled={locked}>
+            삭제
+          </button>
+          <div className="ctx-sep" />
+          {props.folder!.subscribed ? (
+            <button onClick={props.onUnsubscribe}>구독 해제</button>
+          ) : (
+            <button onClick={props.onSubscribe}>구독</button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FolderLabelsEditor() {
+  const [labels, setLabels] = useState<Record<string, string>>(
+    DEFAULT_FOLDER_LABELS,
+  );
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    api
+      .getFolderLabels()
+      .then((l) => setLabels({ ...DEFAULT_FOLDER_LABELS, ...l }))
+      .catch((e) => console.warn("getFolderLabels failed", e));
+  }, []);
+
+  const keys: SpecialUse[] = [
+    "Inbox",
+    "Sent",
+    "Drafts",
+    "Archive",
+    "Junk",
+    "Trash",
+  ];
+
+  async function save() {
+    setBusy(true);
+    try {
+      await api.setFolderLabels(labels);
+      setMsg("저장됨");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setMsg(`저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="folder-labels">
+      {keys.map((k) => (
+        <label className="field" key={k}>
+          <span>{k}</span>
+          <input
+            value={labels[k] ?? ""}
+            onChange={(e) =>
+              setLabels((prev) => ({ ...prev, [k]: e.target.value }))
+            }
+          />
+        </label>
+      ))}
+      <div className="row">
+        <button type="button" onClick={save} disabled={busy}>
+          저장
+        </button>
+      </div>
+      {msg && (
+        <div
+          className={`status ${msg.includes("실패") ? "error" : "success"}`}
+        >
+          {msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RichEditor(props: {
+  value: string;
+  onChange: (html: string) => void;
+}) {
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      Underline,
+      Link.configure({ openOnClick: false, autolink: true }),
+    ],
+    content: props.value || "",
+    onUpdate: ({ editor }) => {
+      props.onChange(editor.getHTML());
+    },
+  });
+
+  if (!editor) return null;
+
+  function btn(
+    label: React.ReactNode,
+    isActive: boolean,
+    onClick: () => void,
+  ) {
+    return (
+      <button
+        type="button"
+        className={isActive ? "tool active" : "tool"}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onClick}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return (
+    <div className="rich-editor">
+      <div className="rich-toolbar">
+        {btn(
+          <b>B</b>,
+          editor.isActive("bold"),
+          () => editor.chain().focus().toggleBold().run(),
+        )}
+        {btn(
+          <i>I</i>,
+          editor.isActive("italic"),
+          () => editor.chain().focus().toggleItalic().run(),
+        )}
+        {btn(
+          <u>U</u>,
+          editor.isActive("underline"),
+          () => editor.chain().focus().toggleUnderline().run(),
+        )}
+        {btn(
+          <s>S</s>,
+          editor.isActive("strike"),
+          () => editor.chain().focus().toggleStrike().run(),
+        )}
+        <span className="sep" />
+        {btn(
+          "• 목록",
+          editor.isActive("bulletList"),
+          () => editor.chain().focus().toggleBulletList().run(),
+        )}
+        {btn(
+          "1. 번호",
+          editor.isActive("orderedList"),
+          () => editor.chain().focus().toggleOrderedList().run(),
+        )}
+        {btn(
+          "❝",
+          editor.isActive("blockquote"),
+          () => editor.chain().focus().toggleBlockquote().run(),
+        )}
+        {btn(
+          "</>",
+          editor.isActive("codeBlock"),
+          () => editor.chain().focus().toggleCodeBlock().run(),
+        )}
+        <span className="sep" />
+        {btn("링크", editor.isActive("link"), () => {
+          const prev = editor.getAttributes("link").href as string | undefined;
+          const url = window.prompt("URL", prev ?? "https://");
+          if (url === null) return;
+          if (url === "") {
+            editor.chain().focus().unsetLink().run();
+          } else {
+            editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+          }
+        })}
+      </div>
+      <EditorContent editor={editor} className="rich-content" />
+    </div>
+  );
+}
+
+function saveDownload(filename: string, mime: string, base64: string) {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mime || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "attachment";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function mergeEnvelopes(first: Envelope[], second: Envelope[]): Envelope[] {
+  const seen = new Set<number>();
+  const out: Envelope[] = [];
+  for (const e of first) {
+    if (!seen.has(e.uid)) {
+      out.push(e);
+      seen.add(e.uid);
+    }
+  }
+  for (const e of second) {
+    if (!seen.has(e.uid)) {
+      out.push(e);
+      seen.add(e.uid);
+    }
+  }
+  return out.sort((a, b) => b.uid - a.uid);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function plainToHtml(text: string): string {
+  if (!text) return "";
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return escaped
+    .split(/\n{2,}/)
+    .map((para) => `<p>${para.replace(/\n/g, "<br/>") || "<br/>"}</p>`)
+    .join("");
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(
+      null,
+      Array.from(bytes.subarray(i, i + chunk)),
+    );
+  }
+  return btoa(binary);
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function wrapHtml(subject: string, html: string): string {
+  const interceptor = `
+<script>
+(function(){
+  document.addEventListener('click', function(ev){
+    var node = ev.target;
+    while (node && node.nodeType === 1) {
+      if (node.tagName === 'A' && node.href) {
+        ev.preventDefault();
+        try {
+          window.parent.postMessage({type: 'manty-open-link', url: node.href}, '*');
+        } catch (e) {}
+        return;
+      }
+      node = node.parentNode;
+    }
+  }, true);
+})();
+</script>`;
+  const trimmed = html.trimStart().toLowerCase();
+  const safeTitle = subject.replace(/[<>&]/g, (c) =>
+    c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;",
+  );
+  if (trimmed.startsWith("<!doctype") || trimmed.startsWith("<html")) {
+    // Inject interceptor before </body> or as fallback append.
+    if (/<\/body>/i.test(html)) {
+      return html.replace(/<\/body>/i, `${interceptor}</body>`);
+    }
+    return `${html}${interceptor}`;
+  }
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${safeTitle}</title></head><body>${html}${interceptor}</body></html>`;
+}

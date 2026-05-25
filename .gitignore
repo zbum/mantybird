@@ -1,0 +1,35 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+
+# Rust / Tauri build artifacts
+target/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock.bak
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.swp/
+
+# Claude Code / oh-my-claudecode state
+.claude/
+.omc/
+**/.claude/
+**/.omc/
+
+# Local env / secrets (just in case)
+.env
+.env.local
+*.env
+
+# Runtime data the app writes to user-local locations
+# (these never live in the repo, but listed for awareness):
+#   ~/Library/Application Support/dev.manty.manty-imap-desktop/
+#     - cache.sqlite       (mail headers/bodies cache)
+#     - config.json        (accounts metadata, no passwords)
+#   macOS Keychain          (passwords; never in repo)
