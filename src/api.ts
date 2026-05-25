@@ -84,6 +84,22 @@ export function setFolderLabels(
   return invoke("set_folder_labels", { labels });
 }
 
+export function getLastMailbox(): Promise<string | null> {
+  return invoke("get_last_mailbox");
+}
+
+export function setLastMailbox(mailbox: string | null): Promise<StoredConfig> {
+  return invoke("set_last_mailbox", { mailbox });
+}
+
+export function getExpandedFolders(): Promise<string[]> {
+  return invoke("get_expanded_folders");
+}
+
+export function setExpandedFolders(paths: string[]): Promise<StoredConfig> {
+  return invoke("set_expanded_folders", { paths });
+}
+
 export function downloadAttachment(
   mailbox: string,
   uid: number,
