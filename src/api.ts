@@ -35,6 +35,29 @@ export function fetchBody(
   return invoke("fetch_body", { mailbox, uid });
 }
 
+export function pruneDeleted(
+  mailbox: string,
+  uids: number[],
+): Promise<number[]> {
+  return invoke("prune_deleted", { mailbox, uids });
+}
+
+export function deletePermanent(mailbox: string, uid: number): Promise<void> {
+  return invoke("delete_permanent", { mailbox, uid });
+}
+
+export interface DebugLogEntry {
+  id: number;
+  ts: number;
+  channel: string;
+  direction: string;
+  text: string;
+}
+
+export function getDebugLog(): Promise<DebugLogEntry[]> {
+  return invoke("get_debug_log");
+}
+
 export function searchMailbox(
   mailbox: string,
   query: string,

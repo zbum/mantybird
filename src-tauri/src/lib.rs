@@ -10,6 +10,7 @@ use tracing::warn;
 mod account;
 mod cache;
 mod config;
+mod debug_log;
 mod mail;
 
 use account::Account;
@@ -300,6 +301,49 @@ async fn fetch_envelopes(
     // Start (or rebind) IDLE worker to push new-mail notifications.
     ensure_idle_for(&state, &app, &mailbox).await;
     Ok(envs)
+}
+
+#[tauri::command]
+fn get_debug_log() -> Vec<debug_log::LogEntry> {
+    debug_log::handle()
+        .map(|h| h.snapshot())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn prune_deleted(
+    state: State<'_, AppState>,
+    mailbox: String,
+    uids: Vec<u32>,
+) -> Result<Vec<u32>, String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mailbox_owned = mailbox.clone();
+    let uids_owned = uids.clone();
+    let alive = with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        let u = uids_owned.clone();
+        Box::pin(async move { imap_client::check_uids_alive(sess, &mb, &u).await })
+    })
+    .await?;
+
+    let alive_set: std::collections::HashSet<u32> = alive.into_iter().collect();
+    let missing: Vec<u32> = uids.into_iter().filter(|u| !alive_set.contains(u)).collect();
+
+    if !missing.is_empty() {
+        state
+            .cache
+            .delete_messages(key, mailbox, missing.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(missing)
 }
 
 #[tauri::command]
@@ -606,6 +650,31 @@ async fn set_flag(
         warn!(error = %e, "cache set_flag persistence failed");
     }
     Ok(flags)
+}
+
+#[tauri::command]
+async fn delete_permanent(
+    state: State<'_, AppState>,
+    mailbox: String,
+    uid: u32,
+) -> Result<(), String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+    let mailbox_owned = mailbox.clone();
+    with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        Box::pin(async move { imap_client::delete_permanent(sess, &mb, uid).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .delete_messages(key, mailbox, vec![uid])
+        .await
+    {
+        warn!(error = %e, "cache delete_messages after permanent delete failed");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -968,8 +1037,10 @@ pub fn run() {
         .ok();
 
     let cache = Cache::open().expect("failed to open cache");
+    debug_log::init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState {
             session: Arc::new(Mutex::new(None)),
             current_account: Arc::new(Mutex::new(None)),
@@ -987,6 +1058,8 @@ pub fn run() {
             fetch_envelopes,
             search_mailbox,
             fetch_body,
+            prune_deleted,
+            get_debug_log,
             download_attachment,
             get_download_dir,
             set_download_dir,
@@ -1003,6 +1076,7 @@ pub fn run() {
             mark_seen,
             set_flag,
             move_to_trash,
+            delete_permanent,
             create_mailbox,
             rename_mailbox,
             delete_mailbox,
@@ -1022,11 +1096,19 @@ pub fn run() {
         ])
         .setup(|app| {
             use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-            use tauri::Emitter;
+            use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+            if let Some(log) = debug_log::handle() {
+                log.bind(app.handle().clone());
+            }
 
             let preferences = MenuItemBuilder::new("환경설정...")
                 .id("open-settings")
                 .accelerator("Cmd+,")
+                .build(app)?;
+            let debug_console = MenuItemBuilder::new("Developer Console…")
+                .id("open-debug")
+                .accelerator("Cmd+Shift+D")
                 .build(app)?;
             let quit = MenuItemBuilder::new("Mantybird 종료")
                 .id("quit")
@@ -1034,6 +1116,7 @@ pub fn run() {
                 .build(app)?;
             let app_menu = SubmenuBuilder::new(app, "Mantybird")
                 .item(&preferences)
+                .item(&debug_console)
                 .separator()
                 .item(&quit)
                 .build()?;
@@ -1041,9 +1124,24 @@ pub fn run() {
             app.set_menu(menu)?;
 
             let handle = app.handle().clone();
-            app.on_menu_event(move |_app, event| match event.id().0.as_str() {
+            app.on_menu_event(move |app, event| match event.id().0.as_str() {
                 "open-settings" => {
                     let _ = handle.emit("settings:open", ());
+                }
+                "open-debug" => {
+                    if let Some(w) = app.get_webview_window("debug") {
+                        let _ = w.set_focus();
+                    } else if let Err(e) = WebviewWindowBuilder::new(
+                        app,
+                        "debug",
+                        WebviewUrl::App("index.html#debug".into()),
+                    )
+                    .title("Developer Console")
+                    .inner_size(900.0, 600.0)
+                    .build()
+                    {
+                        tracing::warn!(error = %e, "failed to open debug window");
+                    }
                 }
                 "quit" => std::process::exit(0),
                 _ => {}

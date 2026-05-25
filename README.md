@@ -27,9 +27,27 @@ Cross-platform IMAP desktop client built with **Tauri 2** (Rust backend) +
   `UID SEARCH CHARSET UTF-8 TEXT ...`
 - **Flag / read state**: mark read on open, toggle Flagged (`\Flagged`),
   Move-to-Trash (RFC 6851 `MOVE` with COPY+EXPUNGE fallback)
+- **Keyboard delete**: Backspace/Delete trashes the selected message;
+  inside Junk/Trash it prompts for permanent delete (STORE `+\Deleted`
+  + EXPUNGE)
+- **Optimistic UI**: deletes apply to the list instantly and roll back
+  on server failure (works in search results too)
+- **Server-side deletion sync**: after a folder opens and on IDLE push,
+  the top 1000 visible UIDs are reconciled against the server via
+  `UID FETCH (UID)` so messages expunged from another client disappear
+- **Background body prefetch**: after the envelope list loads, message
+  bodies are slowly fetched in the background (1.5s spacing) so opening
+  a mail later is instant. STORE / fetchBody initiated by the user
+  always preempts the prefetch.
+- **Window state persistence**: last window size & position restored on
+  relaunch (`tauri-plugin-window-state`)
+- **Developer Console**: Mantybird → Developer Console… (⌘⇧D) opens a
+  separate window that streams every IMAP / SMTP / IDLE command and
+  response in real time, with per-channel toggles
 - **Secrets**: passwords stored in OS keychain
   (`apple-native` / `linux-native-sync-persistent` / `windows-native`)
-- **macOS app menu**: ⌘, opens Settings, ⌘Q quits
+- **macOS app menu**: ⌘, opens Settings, ⌘⇧D opens Developer Console,
+  ⌘Q quits
 
 ---
 
@@ -128,3 +146,39 @@ Dual-licensed under either of
   ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
+
+---
+
+## Changelog
+
+### 2026-05-25 — feature/background-body-prefetch
+
+- **Background body prefetch** — message bodies for the current folder
+  are prefetched in the background (1.5s spacing) so opening a mail
+  later is instant; the loop cancels on folder/account switch.
+- **User actions preempt prefetch** — clicking a mail / mark-seen
+  STORE / move-to-trash / permanent delete each push prefetch into a
+  short pause window so the IMAP session is free for the user.
+- **Server-side deletion sync** — new `prune_deleted(mailbox, uids)`
+  Tauri command verifies the top 1000 visible UIDs against the server
+  via `UID FETCH (UID)` and removes anything the server no longer has
+  from both cache and UI. Triggered on folder open and on IDLE push.
+- **Keyboard delete** — Backspace / Delete in the mailbox view trashes
+  the selected message; in Junk / Trash it prompts and then `STORE
+  +\Deleted` + `EXPUNGE` for permanent delete. Optimistic UI removal,
+  rollback on server failure, also clears search results.
+- **Race-condition fixes** — `listGenRef` invalidates stale envelope
+  fetches when folder or account changes so late results can't
+  overwrite the new view.
+- **Window state persistence** — added `tauri-plugin-window-state`
+  (capability `window-state:default`) for restored size & position.
+- **Developer Console** — Mantybird → Developer Console… (⌘⇧D) opens
+  a separate webview window that streams IMAP / SMTP / IDLE traffic
+  via a new `debug_log` ring buffer + `debug:log` Tauri events. New
+  Tauri command `get_debug_log()` returns a snapshot.
+- **Lighter prune wire payload** — switched server-side reconciliation
+  from `UID SEARCH ALL` (slow on large mailboxes) to
+  `UID FETCH <set> (UID)` over a bounded UID set.
+- **New module**: `src-tauri/src/debug_log.rs` (ring buffer + global
+  handle bound to AppHandle during `setup`).
+- **Schema**: `StoredConfig` unchanged. Cache schema unchanged.

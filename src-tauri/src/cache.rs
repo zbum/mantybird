@@ -208,6 +208,34 @@ impl Cache {
         .await?
     }
 
+    pub async fn delete_messages(
+        &self,
+        account_key: String,
+        mailbox: String,
+        uids: Vec<u32>,
+    ) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
+            let tx = guard.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "DELETE FROM messages
+                     WHERE account_key = ?1 AND mailbox = ?2 AND uid = ?3",
+                )?;
+                for uid in &uids {
+                    stmt.execute(params![account_key, mailbox, *uid as i64])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await?
+    }
+
     pub async fn put_body(
         &self,
         account_key: String,

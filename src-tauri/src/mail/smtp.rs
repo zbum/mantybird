@@ -122,8 +122,27 @@ pub async fn send_mail(
     };
     let transport = transport_builder.build();
 
-    transport.send(msg).await.context("SMTP send failed")?;
-    Ok(raw)
+    crate::debug_log::push(
+        "smtp",
+        "→",
+        format!(
+            "SEND host={}:{} from={} ({} bytes)",
+            account.smtp_host,
+            account.smtp_port,
+            account.username,
+            raw.len()
+        ),
+    );
+    match transport.send(msg).await {
+        Ok(_) => {
+            crate::debug_log::push("smtp", "←", "SEND OK");
+            Ok(raw)
+        }
+        Err(e) => {
+            crate::debug_log::push("smtp", "←", format!("SEND failed: {}", e));
+            Err(anyhow::Error::from(e).context("SMTP send failed"))
+        }
+    }
 }
 
 pub fn auto_save_to_sent(account: &Account) -> bool {
