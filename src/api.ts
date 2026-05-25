@@ -66,6 +66,14 @@ export function setDownloadDir(dir: string | null): Promise<StoredConfig> {
   return invoke("set_download_dir", { dir });
 }
 
+export function getMarkSeenDelay(): Promise<number> {
+  return invoke("get_mark_seen_delay");
+}
+
+export function setMarkSeenDelay(seconds: number): Promise<StoredConfig> {
+  return invoke("set_mark_seen_delay", { seconds });
+}
+
 export function getFolderLabels(): Promise<Record<string, string>> {
   return invoke("get_folder_labels");
 }

@@ -93,6 +93,11 @@ export default function App() {
   const selectedFolderRef = useRef<string | null>(null);
   selectedFolderRef.current = selectedFolder;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const selectionGenRef = useRef(0);
+  const markSeenTimerRef = useRef<number | null>(null);
+  const [markSeenDelay, setMarkSeenDelay] = useState(0);
+  const markSeenDelayRef = useRef(0);
+  markSeenDelayRef.current = markSeenDelay;
 
   const PAGE_SIZE = 50;
   // How many cached envelopes to load up-front when opening a folder.
@@ -115,6 +120,11 @@ export default function App() {
     message: string;
     resolve: (v: boolean) => void;
   } | null>(null);
+  const [pwPromptState, setPwPromptState] = useState<{
+    account: Account;
+    message: string;
+    resolve: (v: string | null) => void;
+  } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{
     x: number;
     y: number;
@@ -132,6 +142,14 @@ export default function App() {
   }
   function askConfirm(message: string): Promise<boolean> {
     return new Promise((resolve) => setConfirmState({ message, resolve }));
+  }
+  function askPassword(
+    acc: Account,
+    message: string,
+  ): Promise<string | null> {
+    return new Promise((resolve) =>
+      setPwPromptState({ account: acc, message, resolve }),
+    );
   }
 
   useEffect(() => {
@@ -154,6 +172,13 @@ export default function App() {
         setFolderLabels({ ...DEFAULT_FOLDER_LABELS, ...labels }),
       )
       .catch((e) => console.warn("getFolderLabels failed", e));
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    api
+      .getMarkSeenDelay()
+      .then(setMarkSeenDelay)
+      .catch((e) => console.warn("getMarkSeenDelay failed", e));
   }, [settingsOpen]);
 
   function openCompose(draft?: Partial<ComposeDraft>) {
@@ -185,7 +210,7 @@ export default function App() {
 
   async function startWithAccount(acc: Account) {
     setAccount(acc);
-    const pw = await api.loadPassword(acc);
+    let pw = await api.loadPassword(acc);
     try {
       const cachedF = await api.cachedFolders(acc);
       if (cachedF.length > 0) {
@@ -199,23 +224,48 @@ export default function App() {
     } catch (e) {
       console.warn("cachedFolders failed", e);
     }
-    if (pw) {
-      setPassword(pw);
-      try {
-        setConnecting(true);
-        const fs = await api.connectImap(acc.host, acc.port, acc.username, pw);
-        setFolders(fs);
-        setExpanded(
-          new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
-        );
-        setScreen("mailbox");
-        setStatus(`Connected · ${fs.length} folders`);
-      } catch (err) {
-        setStatus(`Auto-connect failed: ${err}`);
-        setError(true);
-      } finally {
-        setConnecting(false);
+    if (!pw) return;
+    setPassword(pw);
+    setConnecting(true);
+    try {
+      while (true) {
+        try {
+          const fs = await api.connectImap(
+            acc.host,
+            acc.port,
+            acc.username,
+            pw,
+          );
+          setFolders(fs);
+          setExpanded(
+            new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
+          );
+          setScreen("mailbox");
+          setStatus(`Connected · ${fs.length} folders`);
+          return;
+        } catch (err) {
+          if (isAuthError(err)) {
+            const newPw = await askPassword(
+              acc,
+              "비밀번호가 올바르지 않습니다. 다시 입력해주세요.",
+            );
+            if (!newPw) {
+              setStatus("비밀번호가 올바르지 않습니다");
+              setError(true);
+              return;
+            }
+            pw = newPw;
+            setPassword(newPw);
+            await api.savePassword(acc, newPw);
+          } else {
+            setStatus(`Auto-connect failed: ${err}`);
+            setError(true);
+            return;
+          }
+        }
       }
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -367,31 +417,54 @@ export default function App() {
     setConnecting(true);
     setError(false);
     setStatus("Connecting…");
+    let pw = password;
     try {
-      const fs = await api.connectImap(
-        account.host,
-        account.port,
-        account.username,
-        password,
-      );
-      await api.upsertAccount(account);
-      await api.setCurrentAccount(account);
-      await api.savePassword(account, password);
-      setFolders(fs);
-      setExpanded(
-        new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
-      );
-      setStatus(`Connected · ${fs.length} folders`);
-      setScreen("mailbox");
-    } catch (err) {
-      setStatus(`Connect failed: ${err}`);
-      setError(true);
+      while (true) {
+        try {
+          const fs = await api.connectImap(
+            account.host,
+            account.port,
+            account.username,
+            pw,
+          );
+          await api.upsertAccount(account);
+          await api.setCurrentAccount(account);
+          await api.savePassword(account, pw);
+          setPassword(pw);
+          setFolders(fs);
+          setExpanded(
+            new Set(fs.filter((f) => f.has_children).map((f) => f.raw)),
+          );
+          setStatus(`Connected · ${fs.length} folders`);
+          setScreen("mailbox");
+          return;
+        } catch (err) {
+          if (isAuthError(err)) {
+            const newPw = await askPassword(
+              account,
+              "비밀번호가 올바르지 않습니다. 다시 입력해주세요.",
+            );
+            if (!newPw) {
+              setStatus("비밀번호가 올바르지 않습니다");
+              setError(true);
+              return;
+            }
+            pw = newPw;
+            setPassword(newPw);
+          } else {
+            setStatus(`Connect failed: ${err}`);
+            setError(true);
+            return;
+          }
+        }
+      }
     } finally {
       setConnecting(false);
     }
   }
 
   async function handleSelectFolder(folder: Folder) {
+    selectionGenRef.current++;
     setSelectedFolder(folder.raw);
     setBody(null);
     setSelectedUid(null);
@@ -490,52 +563,112 @@ export default function App() {
   }, [selectedFolder, loadingMore, noMore, account]);
 
   async function handleSelectMessage(uid: number) {
+    const gen = ++selectionGenRef.current;
+    const folder = selectedFolder;
+    if (markSeenTimerRef.current !== null) {
+      clearTimeout(markSeenTimerRef.current);
+      markSeenTimerRef.current = null;
+    }
     setSelectedUid(uid);
     setBody(null);
     setLoadingBody(true);
-    if (selectedFolder) {
+    if (folder) {
       try {
-        const cached = await api.cachedBody(account, selectedFolder, uid);
+        const cached = await api.cachedBody(account, folder, uid);
+        if (selectionGenRef.current !== gen) return;
         if (cached) {
           setBody(cached);
           setLoadingBody(false);
         }
       } catch (e) {
+        if (selectionGenRef.current !== gen) return;
         console.warn("cachedBody failed", e);
       }
     }
-    if (!selectedFolder) {
-      setLoadingBody(false);
+    if (!folder) {
+      if (selectionGenRef.current === gen) setLoadingBody(false);
       return;
     }
     try {
-      const b = await api.fetchBody(selectedFolder, uid);
+      const b = await api.fetchBody(folder, uid);
+      if (selectionGenRef.current !== gen) return;
       setBody(b);
     } catch (err) {
+      if (selectionGenRef.current !== gen) return;
       setStatus(`Body fetch failed: ${err}`);
     } finally {
-      setLoadingBody(false);
+      if (selectionGenRef.current === gen) setLoadingBody(false);
     }
+    scheduleMarkSeen(gen, folder, uid);
+  }
+
+  function scheduleMarkSeen(gen: number, folder: string, uid: number) {
+    const target = envelopesRef.current.find((e) => e.uid === uid);
+    if (!target || target.seen) return;
+    const delay = markSeenDelayRef.current;
+    const run = () => {
+      markSeenTimerRef.current = null;
+      if (selectionGenRef.current !== gen) return;
+      applyMarkSeen(folder, uid);
+    };
+    if (delay > 0) {
+      markSeenTimerRef.current = window.setTimeout(run, delay * 1000);
+    } else {
+      run();
+    }
+  }
+
+  async function applyMarkSeen(folder: string, uid: number) {
+    // Optimistic envelope + folder unread-count update.
+    setEnvelopes((prev) =>
+      prev.map((e) =>
+        e.uid === uid
+          ? {
+              ...e,
+              seen: true,
+              flags: e.flags.some((f) => f.toLowerCase() === "\\seen")
+                ? e.flags
+                : [...e.flags, "\\Seen"],
+            }
+          : e,
+      ),
+    );
+    setFolders((prev) =>
+      prev.map((f) =>
+        f.raw === folder
+          ? { ...f, unread_count: Math.max(0, f.unread_count - 1) }
+          : f,
+      ),
+    );
     try {
-      const target = envelopes.find((e) => e.uid === uid);
-      const wasUnread = target && !target.seen;
-      const newFlags = await api.markSeen(selectedFolder, uid, true);
+      const newFlags = await api.markSeen(folder, uid, true);
       setEnvelopes((prev) =>
         prev.map((e) =>
           e.uid === uid ? { ...e, flags: newFlags, seen: true } : e,
         ),
       );
-      if (wasUnread) {
-        setFolders((prev) =>
-          prev.map((f) =>
-            f.raw === selectedFolder
-              ? { ...f, unread_count: Math.max(0, f.unread_count - 1) }
-              : f,
-          ),
-        );
-      }
     } catch (err) {
-      console.warn("markSeen failed", err);
+      console.warn("markSeen failed; rolling back", err);
+      setEnvelopes((prev) =>
+        prev.map((e) =>
+          e.uid === uid
+            ? {
+                ...e,
+                seen: false,
+                flags: e.flags.filter(
+                  (f) => f.toLowerCase() !== "\\seen",
+                ),
+              }
+            : e,
+        ),
+      );
+      setFolders((prev) =>
+        prev.map((f) =>
+          f.raw === folder
+            ? { ...f, unread_count: f.unread_count + 1 }
+            : f,
+        ),
+      );
     }
   }
 
@@ -827,6 +960,81 @@ export default function App() {
     });
   }, [folders, expanded]);
 
+  const displayedEnvelopes = useMemo(() => {
+    if (serverResults) return serverResults;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      return envelopes.filter(
+        (e) =>
+          e.subject.toLowerCase().includes(q) ||
+          e.from.toLowerCase().includes(q),
+      );
+    }
+    return envelopes;
+  }, [serverResults, searchQuery, envelopes]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (screen !== "mailbox") return;
+      if (
+        settingsOpen ||
+        composeDraft ||
+        promptState ||
+        confirmState ||
+        pwPromptState ||
+        ctxMenu
+      )
+        return;
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target?.isContentEditable
+      )
+        return;
+      const list = displayedEnvelopes;
+      if (list.length === 0) return;
+      e.preventDefault();
+      const currentIdx =
+        selectedUid === null
+          ? -1
+          : list.findIndex((env) => env.uid === selectedUid);
+      let nextIdx: number;
+      if (e.key === "ArrowDown") {
+        nextIdx = currentIdx < 0 ? 0 : Math.min(currentIdx + 1, list.length - 1);
+      } else {
+        nextIdx =
+          currentIdx < 0 ? list.length - 1 : Math.max(currentIdx - 1, 0);
+      }
+      if (nextIdx === currentIdx) return;
+      handleSelectMessage(list[nextIdx].uid);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [
+    screen,
+    settingsOpen,
+    composeDraft,
+    promptState,
+    confirmState,
+    pwPromptState,
+    ctxMenu,
+    displayedEnvelopes,
+    selectedUid,
+  ]);
+
+  useEffect(() => {
+    if (selectedUid === null) return;
+    const el = document.querySelector(
+      `.envelope[data-uid="${selectedUid}"]`,
+    );
+    if (el)
+      (el as HTMLElement).scrollIntoView({ block: "nearest" });
+  }, [selectedUid]);
+
   return (
     <>
       {screen === "login" ? (
@@ -860,6 +1068,23 @@ export default function App() {
               value={account.username}
               onChange={(e) =>
                 setAccount({ ...account, username: e.target.value })
+              }
+            />
+            <input
+              placeholder="SMTP host (메일 발송용 — 예: smtp.gmail.com)"
+              value={account.smtp_host}
+              onChange={(e) =>
+                setAccount({ ...account, smtp_host: e.target.value })
+              }
+            />
+            <input
+              placeholder="SMTP port (465 = SSL, 587 = STARTTLS)"
+              value={account.smtp_port}
+              onChange={(e) =>
+                setAccount({
+                  ...account,
+                  smtp_port: Number(e.target.value) || 0,
+                })
               }
             />
             <input
@@ -921,20 +1146,10 @@ export default function App() {
               {renderAccountTrees()}
             </div>
             <div className="pane">
-              {(serverResults
-                ? serverResults
-                : searchQuery
-                  ? envelopes.filter((e) => {
-                      const q = searchQuery.toLowerCase();
-                      return (
-                        e.subject.toLowerCase().includes(q) ||
-                        e.from.toLowerCase().includes(q)
-                      );
-                    })
-                  : envelopes
-              ).map((e) => (
+              {displayedEnvelopes.map((e) => (
                 <div
                   key={e.uid}
+                  data-uid={e.uid}
                   className={`envelope ${selectedUid === e.uid ? "selected" : ""} ${e.seen ? "" : "unread"}`}
                   onClick={() => handleSelectMessage(e.uid)}
                 >
@@ -1062,6 +1277,17 @@ export default function App() {
           }}
         />
       )}
+      {pwPromptState && (
+        <PasswordPromptDialog
+          account={pwPromptState.account}
+          message={pwPromptState.message}
+          onSubmit={(v) => {
+            const r = pwPromptState.resolve;
+            setPwPromptState(null);
+            r(v);
+          }}
+        />
+      )}
       {ctxMenu && (
         <FolderContextMenu
           x={ctxMenu.x}
@@ -1109,6 +1335,7 @@ function SettingsModal(props: {
   const [isNew, setIsNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [tab, setTab] = useState<"general" | "accounts">("general");
 
   async function refresh() {
     const c = await api.listAccounts();
@@ -1172,168 +1399,246 @@ function SettingsModal(props: {
 
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal settings-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
         <header className="modal-header">
-          <h2>Settings · Accounts</h2>
+          <h2>Settings</h2>
           <button onClick={props.onClose}>✕</button>
         </header>
-        {editing ? (
-          <form className="modal-body" onSubmit={handleSave}>
-            <h3>{isNew ? "Add account" : "Edit account"}</h3>
-            <input
-              placeholder="Account name (optional)"
-              value={editing.name}
-              onChange={(e) =>
-                setEditing({ ...editing, name: e.target.value })
-              }
-            />
-            <input
-              placeholder="Host"
-              value={editing.host}
-              onChange={(e) =>
-                setEditing({ ...editing, host: e.target.value })
-              }
-            />
-            <input
-              placeholder="Port"
-              value={editing.port}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  port: Number(e.target.value) || 0,
-                })
-              }
-            />
-            <input
-              placeholder="Username"
-              value={editing.username}
-              onChange={(e) =>
-                setEditing({ ...editing, username: e.target.value })
-              }
-            />
-            <input
-              placeholder="SMTP host (e.g. smtp.gmail.com) — for sending mail"
-              value={editing.smtp_host}
-              onChange={(e) =>
-                setEditing({ ...editing, smtp_host: e.target.value })
-              }
-            />
-            <input
-              placeholder="SMTP port (465 = SSL, 587 = STARTTLS)"
-              value={editing.smtp_port}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  smtp_port: Number(e.target.value) || 0,
-                })
-              }
-            />
-            <input
-              placeholder="Password"
-              type="password"
-              value={editPassword}
-              onChange={(e) => setEditPassword(e.target.value)}
-            />
-            {msg && <div className="status error">{msg}</div>}
-            <div className="row">
-              <button type="submit" disabled={busy}>
-                Save
-              </button>
-              <button type="button" onClick={closeEdit} disabled={busy}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : (
-          <div className="modal-body">
-            <div className="account-list">
-              {(config?.accounts || []).map((a) => {
-                const isCurrent =
-                  config?.current_key === accountKey(a);
-                return (
-                  <div className="account-row" key={accountKey(a)}>
-                    <div className="info">
-                      <div className="name">
-                        {a.name || accountKey(a)}
-                        {isCurrent && <span className="badge">현재</span>}
-                      </div>
-                      <div className="key">{accountKey(a)}</div>
-                    </div>
-                    <div className="actions">
-                      {!isCurrent && (
-                        <button
-                          onClick={() => props.onSwitch(a)}
-                          disabled={busy}
-                        >
-                          Switch
-                        </button>
-                      )}
-                      <button onClick={() => openEdit(a)} disabled={busy}>
-                        Edit
-                      </button>
-                      <button onClick={() => handleDelete(a)} disabled={busy}>
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-              {(config?.accounts || []).length === 0 && (
-                <div className="empty">No accounts</div>
+        <div className="modal-tabbed">
+          <nav className="modal-tabs">
+            <button
+              type="button"
+              className={`tab ${tab === "general" ? "active" : ""}`}
+              onClick={() => {
+                setTab("general");
+                closeEdit();
+              }}
+            >
+              일반
+            </button>
+            <button
+              type="button"
+              className={`tab ${tab === "accounts" ? "active" : ""}`}
+              onClick={() => setTab("accounts")}
+            >
+              계정
+            </button>
+          </nav>
+          {tab === "general" && (
+            <div className="modal-body">
+              <h3>환경설정</h3>
+              <label className="field">
+                <span>다운로드 폴더</span>
+                <input
+                  placeholder="비워두면 ~/Downloads (브라우저 기본)"
+                  value={config?.download_dir ?? ""}
+                  onChange={(e) =>
+                    setConfig((prev) =>
+                      prev
+                        ? { ...prev, download_dir: e.target.value || null }
+                        : prev,
+                    )
+                  }
+                />
+              </label>
+              <div className="row">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const c = await api.setDownloadDir(
+                        config?.download_dir || null,
+                      );
+                      setConfig(c);
+                      setMsg("저장됨");
+                    } catch (e) {
+                      setMsg(`저장 실패: ${e}`);
+                    }
+                  }}
+                  disabled={busy}
+                >
+                  저장
+                </button>
+              </div>
+              <hr className="modal-divider" />
+              <label className="field">
+                <span>본문 읽음 처리 지연 (초, 0 = 즉시)</span>
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="예: 5"
+                  value={config?.mark_seen_delay_seconds ?? 0}
+                  onChange={(e) => {
+                    const n = Math.max(0, Number(e.target.value) || 0);
+                    setConfig((prev) =>
+                      prev ? { ...prev, mark_seen_delay_seconds: n } : prev,
+                    );
+                  }}
+                />
+              </label>
+              <p className="sub">
+                본문을 N초 이상 보고 있을 때만 IMAP에 \Seen을 기록합니다.
+                0이면 클릭 즉시 처리.
+              </p>
+              <div className="row">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const n = config?.mark_seen_delay_seconds ?? 0;
+                      const c = await api.setMarkSeenDelay(n);
+                      setConfig(c);
+                      setMsg("저장됨");
+                    } catch (e) {
+                      setMsg(`저장 실패: ${e}`);
+                    }
+                  }}
+                  disabled={busy}
+                >
+                  저장
+                </button>
+              </div>
+              <hr className="modal-divider" />
+              <h3>폴더 라벨</h3>
+              <p className="sub">
+                특수 용도 폴더(RFC 6154 \Sent, \Drafts 등) 화면 표시 이름.
+                IMAP 통신에는 영향 없음.
+              </p>
+              <FolderLabelsEditor />
+              {msg && (
+                <div
+                  className={`status ${msg.includes("실패") ? "error" : "success"}`}
+                >
+                  {msg}
+                </div>
               )}
             </div>
-            <button onClick={openAdd}>+ Add account</button>
-            <hr className="modal-divider" />
-            <h3>환경설정</h3>
-            <label className="field">
-              <span>다운로드 폴더</span>
-              <input
-                placeholder="비워두면 ~/Downloads (브라우저 기본)"
-                value={config?.download_dir ?? ""}
-                onChange={(e) =>
-                  setConfig((prev) =>
-                    prev
-                      ? { ...prev, download_dir: e.target.value || null }
-                      : prev,
-                  )
-                }
-              />
-            </label>
-            <div className="row">
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const c = await api.setDownloadDir(
-                      config?.download_dir || null,
-                    );
-                    setConfig(c);
-                    setMsg("저장됨");
-                  } catch (e) {
-                    setMsg(`저장 실패: ${e}`);
+          )}
+          {tab === "accounts" &&
+            (editing ? (
+              <form className="modal-body" onSubmit={handleSave}>
+                <h3>{isNew ? "Add account" : "Edit account"}</h3>
+                <input
+                  placeholder="Account name (optional)"
+                  value={editing.name}
+                  onChange={(e) =>
+                    setEditing({ ...editing, name: e.target.value })
                   }
-                }}
-                disabled={busy}
-              >
-                저장
-              </button>
-            </div>
-            <hr className="modal-divider" />
-            <h3>폴더 라벨</h3>
-            <p className="sub">
-              특수 용도 폴더(RFC 6154 \Sent, \Drafts 등) 화면 표시 이름.
-              IMAP 통신에는 영향 없음.
-            </p>
-            <FolderLabelsEditor />
-            {msg && (
-              <div
-                className={`status ${msg.includes("실패") ? "error" : "success"}`}
-              >
-                {msg}
+                />
+                <input
+                  placeholder="Host"
+                  value={editing.host}
+                  onChange={(e) =>
+                    setEditing({ ...editing, host: e.target.value })
+                  }
+                />
+                <input
+                  placeholder="Port"
+                  value={editing.port}
+                  onChange={(e) =>
+                    setEditing({
+                      ...editing,
+                      port: Number(e.target.value) || 0,
+                    })
+                  }
+                />
+                <input
+                  placeholder="Username"
+                  value={editing.username}
+                  onChange={(e) =>
+                    setEditing({ ...editing, username: e.target.value })
+                  }
+                />
+                <input
+                  placeholder="SMTP host (e.g. smtp.gmail.com) — for sending mail"
+                  value={editing.smtp_host}
+                  onChange={(e) =>
+                    setEditing({ ...editing, smtp_host: e.target.value })
+                  }
+                />
+                <input
+                  placeholder="SMTP port (465 = SSL, 587 = STARTTLS)"
+                  value={editing.smtp_port}
+                  onChange={(e) =>
+                    setEditing({
+                      ...editing,
+                      smtp_port: Number(e.target.value) || 0,
+                    })
+                  }
+                />
+                <input
+                  placeholder="Password"
+                  type="password"
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                />
+                {msg && <div className="status error">{msg}</div>}
+                <div className="row">
+                  <button type="submit" disabled={busy}>
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeEdit}
+                    disabled={busy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="modal-body">
+                <div className="account-list">
+                  {(config?.accounts || []).map((a) => {
+                    const isCurrent =
+                      config?.current_key === accountKey(a);
+                    return (
+                      <div className="account-row" key={accountKey(a)}>
+                        <div className="info">
+                          <div className="name">
+                            {a.name || accountKey(a)}
+                            {isCurrent && (
+                              <span className="badge">현재</span>
+                            )}
+                          </div>
+                          <div className="key">{accountKey(a)}</div>
+                        </div>
+                        <div className="actions">
+                          {!isCurrent && (
+                            <button
+                              onClick={() => props.onSwitch(a)}
+                              disabled={busy}
+                            >
+                              Switch
+                            </button>
+                          )}
+                          <button
+                            onClick={() => openEdit(a)}
+                            disabled={busy}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDelete(a)}
+                            disabled={busy}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(config?.accounts || []).length === 0 && (
+                    <div className="empty">No accounts</div>
+                  )}
+                </div>
+                <button onClick={openAdd}>+ Add account</button>
               </div>
-            )}
-          </div>
-        )}
+            ))}
+        </div>
       </div>
     </div>
   );
@@ -1624,6 +1929,64 @@ function ConfirmDialog(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+function PasswordPromptDialog(props: {
+  account: Account;
+  message: string;
+  onSubmit: (value: string | null) => void;
+}) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="modal-backdrop" onClick={() => props.onSubmit(null)}>
+      <div
+        className="modal"
+        style={{ width: 380 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="modal-header">
+          <h2>비밀번호 입력</h2>
+        </header>
+        <form
+          className="modal-body"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!value) return;
+            props.onSubmit(value);
+          }}
+        >
+          <div className="status error">{props.message}</div>
+          <label className="field">
+            <span>
+              {props.account.username}@{props.account.host}
+            </span>
+          </label>
+          <input
+            autoFocus
+            type="password"
+            placeholder="비밀번호"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <div className="row">
+            <button type="submit" disabled={!value}>
+              확인
+            </button>
+            <button type="button" onClick={() => props.onSubmit(null)}>
+              취소
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function isAuthError(err: unknown): boolean {
+  const s = String(err);
+  return /IMAP login failed|AUTHENTICATIONFAILED|authentication failed|invalid credentials|invalid username|invalid password|wrong password|password.*incorrect|LOGIN failed/i.test(
+    s,
   );
 }
 
