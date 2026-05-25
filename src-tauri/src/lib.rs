@@ -525,6 +525,26 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_last_mailbox() -> Option<String> {
+    config::load().last_mailbox
+}
+
+#[tauri::command]
+fn set_last_mailbox(mailbox: Option<String>) -> Result<StoredConfig, String> {
+    config::set_last_mailbox(mailbox).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_expanded_folders() -> Vec<String> {
+    config::load().expanded_folders
+}
+
+#[tauri::command]
+fn set_expanded_folders(paths: Vec<String>) -> Result<StoredConfig, String> {
+    config::set_expanded_folders(paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_folder_labels() -> std::collections::HashMap<String, String> {
     config::load()
         .folder_labels
@@ -974,6 +994,10 @@ pub fn run() {
             set_mark_seen_delay,
             get_folder_labels,
             set_folder_labels,
+            get_last_mailbox,
+            set_last_mailbox,
+            get_expanded_folders,
+            set_expanded_folders,
             open_url,
             reveal_in_file_manager,
             mark_seen,
