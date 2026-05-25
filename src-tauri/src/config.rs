@@ -34,6 +34,8 @@ pub struct StoredConfig {
     pub download_dir: Option<String>,
     #[serde(default)]
     pub folder_labels: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub mark_seen_delay_seconds: u32,
     // Back-compat with the old single-account schema.
     #[serde(default, skip_serializing)]
     pub account: Option<Account>,
@@ -49,6 +51,13 @@ pub fn set_folder_labels(labels: HashMap<String, String>) -> Result<StoredConfig
 pub fn set_download_dir(dir: Option<String>) -> Result<StoredConfig> {
     let mut cfg = load();
     cfg.download_dir = dir.filter(|s| !s.trim().is_empty());
+    save(&cfg)?;
+    Ok(cfg)
+}
+
+pub fn set_mark_seen_delay_seconds(seconds: u32) -> Result<StoredConfig> {
+    let mut cfg = load();
+    cfg.mark_seen_delay_seconds = seconds;
     save(&cfg)?;
     Ok(cfg)
 }
