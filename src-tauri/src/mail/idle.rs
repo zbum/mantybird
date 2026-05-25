@@ -65,12 +65,15 @@ async fn one_session(
         return Ok(());
     }
 
+    crate::debug_log::push("idle", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await?;
+    crate::debug_log::push("idle", "←", "SELECT OK");
     let mut session = session;
 
     loop {
         let mut handle = session.idle();
         handle.init().await?;
+        crate::debug_log::push("idle", "→", "IDLE");
         let (fut, _stop_source) =
             handle.wait_with_timeout(Duration::from_secs(25 * 60));
         let response = fut.await?;
@@ -79,6 +82,11 @@ async fn one_session(
 
         match response {
             IdleResponse::NewData(_) => {
+                crate::debug_log::push(
+                    "idle",
+                    "←",
+                    format!("NewData ({:?})", mailbox),
+                );
                 let _ = app.emit(
                     "mail:new",
                     NewMailEvent {
@@ -87,7 +95,7 @@ async fn one_session(
                 );
             }
             IdleResponse::Timeout | IdleResponse::ManualInterrupt => {
-                // Continue: send fresh IDLE.
+                crate::debug_log::push("idle", "←", "Timeout/Interrupt");
             }
         }
     }

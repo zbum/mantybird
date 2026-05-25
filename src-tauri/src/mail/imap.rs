@@ -46,6 +46,7 @@ pub async fn connect(
     username: &str,
     password: &str,
 ) -> Result<ImapSession> {
+    crate::debug_log::push("imap", "→", format!("CONNECT {}:{}", host, port));
     let connector = tls_connector()?;
     let tcp = TcpStream::connect((host, port))
         .await
@@ -56,12 +57,18 @@ pub async fn connect(
         .connect(dns, tcp)
         .await
         .context("TLS handshake failed")?;
+    crate::debug_log::push("imap", "←", "TLS OK");
 
     let client = async_imap::Client::new(tls);
+    crate::debug_log::push("imap", "→", format!("LOGIN {} ***", username));
     let mut session = client
         .login(username, password)
         .await
-        .map_err(|(e, _)| anyhow!("IMAP login failed: {e}"))?;
+        .map_err(|(e, _)| {
+            crate::debug_log::push("imap", "←", format!("LOGIN failed: {}", e));
+            anyhow!("IMAP login failed: {e}")
+        })?;
+    crate::debug_log::push("imap", "←", "LOGIN OK");
     // RFC 2971 ID — advertise our client to the server. Best-effort; servers
     // that don't support the ID extension reject this with NO/BAD which we
     // silently ignore.
@@ -105,8 +112,37 @@ pub async fn discover_delimiter(session: &mut ImapSession) -> Result<String> {
 }
 
 pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<Folder>> {
+    crate::debug_log::push("imap", "→", "LIST \"\" \"*\"");
     let stream = session.list(Some(""), Some("*")).await?;
     let entries: Vec<_> = stream.try_collect().await?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("LIST OK — {} entries", entries.len()),
+    );
+    // Emit specials on their own line so the trash / junk wire-format name
+    // is easy to spot when debugging MOVE / SELECT failures.
+    for n in &entries {
+        let attrs = n.attributes();
+        let name_is_inbox = n.name().eq_ignore_ascii_case("INBOX");
+        let attr_is_special = attrs.iter().any(|a| {
+            matches!(
+                a,
+                NameAttribute::Sent
+                    | NameAttribute::Drafts
+                    | NameAttribute::Archive
+                    | NameAttribute::Junk
+                    | NameAttribute::Trash
+            )
+        });
+        if name_is_inbox || attr_is_special {
+            crate::debug_log::push(
+                "imap",
+                "←",
+                format!("  · {:?} attrs={:?}", n.name(), attrs),
+            );
+        }
+    }
 
     // LSUB to discover which mailboxes the user has subscribed to.
     // Some servers (Gmail) treat all mailboxes as subscribed; failures are
@@ -271,20 +307,73 @@ fn parse_envelopes(fetched: Vec<async_imap::types::Fetch>) -> Vec<Envelope> {
     envelopes
 }
 
+/// Returns the subset of `uids` that the server still has in `mailbox`.
+/// Uses a single `UID FETCH <set> (UID)` so the wire payload stays bounded
+/// (one tiny line per surviving UID) regardless of mailbox size.
+pub async fn check_uids_alive(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uids: &[u32],
+) -> Result<Vec<u32>> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
+    let mb = session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("SELECT OK exists={}", mb.exists),
+    );
+    if uids.is_empty() || mb.exists == 0 {
+        return Ok(Vec::new());
+    }
+    let uid_set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("UID FETCH <{} uids> (UID)", uids.len()),
+    );
+    let stream = session
+        .uid_fetch(uid_set, "UID")
+        .await
+        .context("UID FETCH (UID) failed")?;
+    let entries: Vec<_> = stream
+        .try_collect::<Vec<_>>()
+        .await
+        .context("UID FETCH (UID) collect failed")?;
+    let alive: Vec<u32> = entries.iter().filter_map(|f| f.uid).collect();
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID FETCH (UID) → {} alive", alive.len()),
+    );
+    Ok(alive)
+}
+
 pub async fn search_uids(
     session: &mut ImapSession,
     mailbox: &str,
     query: &str,
 ) -> Result<Vec<u32>> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
     let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
     let cmd = format!("CHARSET UTF-8 TEXT \"{}\"", escaped);
+    crate::debug_log::push("imap", "→", format!("UID SEARCH {}", cmd));
     let uids = session
         .uid_search(cmd)
         .await
         .context("UID SEARCH failed")?;
     let mut v: Vec<u32> = uids.into_iter().collect();
     v.sort_by(|a, b| b.cmp(a));
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID SEARCH OK — {} matches", v.len()),
+    );
     Ok(v)
 }
 
@@ -323,7 +412,13 @@ pub async fn fetch_envelopes(
     offset: u32,
     limit: u32,
 ) -> Result<Vec<Envelope>> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     let info = session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("SELECT OK exists={}", info.exists),
+    );
     let total = info.exists;
     if total == 0 || offset >= total {
         return Ok(vec![]);
@@ -331,6 +426,11 @@ pub async fn fetch_envelopes(
     let end = total - offset;
     let start = end.saturating_sub(limit.saturating_sub(1)).max(1);
     let range = format!("{start}:{end}");
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("FETCH {} (UID FLAGS INTERNALDATE BODY.PEEK[HEADER...])", range),
+    );
     // ENVELOPE intentionally NOT requested: async-imap/imap-proto fails on
     // 8-bit chars inside quoted strings (e.g. unencoded Korean names).
     // HEADER.FIELDS minimizes payload (~10x smaller than full HEADER) while
@@ -363,6 +463,11 @@ pub async fn fetch_envelopes(
         });
     }
     envelopes.sort_by_key(|e| std::cmp::Reverse(e.uid));
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("FETCH OK — {} envelopes", envelopes.len()),
+    );
     Ok(envelopes)
 }
 
@@ -413,7 +518,10 @@ pub async fn fetch_body(
     mailbox: &str,
     uid: u32,
 ) -> Result<MessageBody> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
+    crate::debug_log::push("imap", "→", format!("UID FETCH {} RFC822", uid));
     let stream = session
         .uid_fetch(uid.to_string(), "RFC822")
         .await
@@ -422,7 +530,19 @@ pub async fn fetch_body(
     let raw = fetched
         .first()
         .and_then(|f| f.body())
-        .ok_or_else(|| anyhow!("empty body for uid {uid}"))?;
+        .ok_or_else(|| {
+            crate::debug_log::push(
+                "imap",
+                "←",
+                format!("UID FETCH {} → empty body", uid),
+            );
+            anyhow!("empty body for uid {uid}")
+        })?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID FETCH OK — {} bytes", raw.len()),
+    );
 
     let parsed = MessageParser::default()
         .parse(raw)
@@ -599,11 +719,31 @@ pub async fn fetch_attachment_bytes(
 }
 
 pub async fn create_mailbox(session: &mut ImapSession, name: &str) -> Result<()> {
-    session.create(name).await.context("CREATE failed")
+    crate::debug_log::push("imap", "→", format!("CREATE {:?}", name));
+    let r = session.create(name).await.context("CREATE failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "CREATE OK".to_string(),
+            Err(e) => format!("CREATE failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn delete_mailbox(session: &mut ImapSession, name: &str) -> Result<()> {
-    session.delete(name).await.context("DELETE failed")
+    crate::debug_log::push("imap", "→", format!("DELETE {:?}", name));
+    let r = session.delete(name).await.context("DELETE failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "DELETE OK".to_string(),
+            Err(e) => format!("DELETE failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn rename_mailbox(
@@ -611,18 +751,48 @@ pub async fn rename_mailbox(
     from: &str,
     to: &str,
 ) -> Result<()> {
-    session.rename(from, to).await.context("RENAME failed")
+    crate::debug_log::push("imap", "→", format!("RENAME {:?} {:?}", from, to));
+    let r = session.rename(from, to).await.context("RENAME failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "RENAME OK".to_string(),
+            Err(e) => format!("RENAME failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn subscribe_mailbox(session: &mut ImapSession, name: &str) -> Result<()> {
-    session.subscribe(name).await.context("SUBSCRIBE failed")
+    crate::debug_log::push("imap", "→", format!("SUBSCRIBE {:?}", name));
+    let r = session.subscribe(name).await.context("SUBSCRIBE failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "SUBSCRIBE OK".to_string(),
+            Err(e) => format!("SUBSCRIBE failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn unsubscribe_mailbox(session: &mut ImapSession, name: &str) -> Result<()> {
-    session
+    crate::debug_log::push("imap", "→", format!("UNSUBSCRIBE {:?}", name));
+    let r = session
         .unsubscribe(name)
         .await
-        .context("UNSUBSCRIBE failed")
+        .context("UNSUBSCRIBE failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "UNSUBSCRIBE OK".to_string(),
+            Err(e) => format!("UNSUBSCRIBE failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn append_message(
@@ -631,10 +801,24 @@ pub async fn append_message(
     raw: &[u8],
     flags: Option<&str>,
 ) -> Result<()> {
-    session
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("APPEND {:?} ({} bytes) flags={:?}", mailbox, raw.len(), flags),
+    );
+    let r = session
         .append(mailbox, flags, None, raw)
         .await
-        .context("APPEND failed")
+        .context("APPEND failed");
+    crate::debug_log::push(
+        "imap",
+        "←",
+        match &r {
+            Ok(_) => "APPEND OK".to_string(),
+            Err(e) => format!("APPEND failed: {}", e),
+        },
+    );
+    r
 }
 
 pub async fn set_flag(
@@ -644,9 +828,16 @@ pub async fn set_flag(
     flag: &str,
     on: bool,
 ) -> Result<Vec<String>> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
     let op = if on { "+FLAGS" } else { "-FLAGS" };
     let store_arg = format!("{op} ({flag})");
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("UID STORE {} {}", uid, store_arg),
+    );
     let stream = session
         .uid_store(uid.to_string(), &store_arg)
         .await
@@ -658,7 +849,38 @@ pub async fn set_flag(
             flags.push(flag_to_string(&fl));
         }
     }
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID STORE OK — flags=[{}]", flags.join(", ")),
+    );
     Ok(flags)
+}
+
+pub async fn delete_permanent(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uid: u32,
+) -> Result<()> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
+    session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("UID STORE {} +FLAGS (\\Deleted)", uid),
+    );
+    let stream = session
+        .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+        .await
+        .context("STORE \\Deleted failed")?;
+    let _ = stream.try_collect::<Vec<_>>().await?;
+    crate::debug_log::push("imap", "←", "UID STORE OK");
+    crate::debug_log::push("imap", "→", "EXPUNGE");
+    let exp = session.expunge().await.context("EXPUNGE failed")?;
+    let _ = exp.try_collect::<Vec<_>>().await?;
+    crate::debug_log::push("imap", "←", "EXPUNGE OK");
+    Ok(())
 }
 
 pub async fn move_message(
@@ -667,23 +889,56 @@ pub async fn move_message(
     uid: u32,
     dest: &str,
 ) -> Result<()> {
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("SELECT {:?}", mailbox),
+    );
     session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
     // Try RFC 6851 MOVE first; fall back to COPY + \Deleted + EXPUNGE.
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("UID MOVE {} {:?}", uid, dest),
+    );
     match session.uid_mv(uid.to_string(), dest).await {
-        Ok(()) => Ok(()),
-        Err(_) => {
+        Ok(()) => {
+            crate::debug_log::push("imap", "←", "UID MOVE OK");
+            Ok(())
+        }
+        Err(e) => {
+            crate::debug_log::push(
+                "imap",
+                "←",
+                format!("UID MOVE failed: {} — falling back to COPY+STORE+EXPUNGE", e),
+            );
+            crate::debug_log::push(
+                "imap",
+                "→",
+                format!("UID COPY {} {:?}", uid, dest),
+            );
             session
                 .uid_copy(uid.to_string(), dest)
                 .await
                 .context("COPY (fallback for MOVE) failed")?;
+            crate::debug_log::push("imap", "←", "UID COPY OK");
             let store_arg = "+FLAGS (\\Deleted)";
+            crate::debug_log::push(
+                "imap",
+                "→",
+                format!("UID STORE {} {}", uid, store_arg),
+            );
             let stream = session
                 .uid_store(uid.to_string(), store_arg)
                 .await
                 .context("STORE \\Deleted failed")?;
             let _ = stream.try_collect::<Vec<_>>().await?;
+            crate::debug_log::push("imap", "←", "UID STORE OK");
+            crate::debug_log::push("imap", "→", "EXPUNGE");
             let exp = session.expunge().await.context("EXPUNGE failed")?;
             let _ = exp.try_collect::<Vec<_>>().await?;
+            crate::debug_log::push("imap", "←", "EXPUNGE OK");
             Ok(())
         }
     }
@@ -695,8 +950,15 @@ pub async fn mark_seen(
     uid: u32,
     seen: bool,
 ) -> Result<Vec<String>> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push("imap", "←", "SELECT OK");
     let store_arg = if seen { "+FLAGS (\\Seen)" } else { "-FLAGS (\\Seen)" };
+    crate::debug_log::push(
+        "imap",
+        "→",
+        format!("UID STORE {} {}", uid, store_arg),
+    );
     let stream = session
         .uid_store(uid.to_string(), store_arg)
         .await
@@ -708,5 +970,10 @@ pub async fn mark_seen(
             flags.push(flag_to_string(&fl));
         }
     }
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID STORE OK — flags=[{}]", flags.join(", ")),
+    );
     Ok(flags)
 }

@@ -41,7 +41,15 @@ const defaultAccount = (): Account => ({
   smtp_port: 465,
 });
 
+const isDebugWindow =
+  typeof window !== "undefined" && window.location.hash === "#debug";
+
 export default function App() {
+  // The Tauri "debug" window loads the same HTML bundle with #debug; render
+  // only the console there so the main IMAP app doesn't boot a second time.
+  if (isDebugWindow) {
+    return <DebugWindowFrame />;
+  }
   const [screen, setScreen] = useState<"login" | "mailbox">("login");
 
   const [account, setAccount] = useState<Account>(defaultAccount);
@@ -94,15 +102,32 @@ export default function App() {
   selectedFolderRef.current = selectedFolder;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const selectionGenRef = useRef(0);
+  // Bumped on every action that should invalidate any in-flight envelope
+  // list fetch (folder switch, account switch). Async paths capture the gen
+  // at start and discard their results when it no longer matches.
+  const listGenRef = useRef(0);
   const markSeenTimerRef = useRef<number | null>(null);
   const [markSeenDelay, setMarkSeenDelay] = useState(0);
   const markSeenDelayRef = useRef(0);
   markSeenDelayRef.current = markSeenDelay;
+  // Tracks UIDs we've already attempted to prefetch in the current
+  // account+folder, so successive envelope updates only fetch newcomers.
+  const prefetchedBodiesRef = useRef<{ key: string; uids: Set<number> }>({
+    key: "",
+    uids: new Set(),
+  });
+  // Absolute timestamp (ms since epoch) until which background prefetch
+  // should yield to user-initiated IMAP work (select, mark-seen, delete).
+  const prefetchPausedUntilRef = useRef(0);
 
   const PAGE_SIZE = 50;
   // How many cached envelopes to load up-front when opening a folder.
   // Keep generous so previously-fetched messages stay visible across restarts.
   const CACHED_INITIAL_CAP = 5000;
+  // Spacing between background body prefetches so the IMAP session stays
+  // responsive for user-initiated reads.
+  const BODY_PREFETCH_INTERVAL_MS = 1500;
+  const BODY_PREFETCH_ERROR_BACKOFF_MS = 5000;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null);
@@ -391,8 +416,11 @@ export default function App() {
       async (event) => {
         const mb = event.payload.mailbox;
         if (selectedFolderRef.current !== mb) return;
+        const gen = listGenRef.current;
         try {
           const envs = await api.fetchEnvelopes(mb, 0, PAGE_SIZE);
+          if (listGenRef.current !== gen || selectedFolderRef.current !== mb)
+            return;
           let total = 0;
           setEnvelopes((prev) => {
             const merged = mergeEnvelopes(envs, prev);
@@ -402,6 +430,23 @@ export default function App() {
           setStatus(`${total} messages · 새 메일 도착`);
         } catch (e) {
           console.warn("mail:new refetch failed", e);
+        }
+        // IDLE fires NewData on EXPUNGE too — reconcile after every push so
+        // messages deleted from another client disappear here as well.
+        try {
+          // Only check the UIDs that the user can plausibly see (top 1000).
+          // Verifying every cached UID is prohibitively expensive on large
+          // mailboxes; this keeps the wire payload bounded.
+          const visibleUids = envelopesRef.current
+            .slice(0, 1000)
+            .map((e) => e.uid);
+          if (visibleUids.length === 0) return;
+          const removed = await api.pruneDeleted(mb, visibleUids);
+          if (listGenRef.current !== gen || selectedFolderRef.current !== mb)
+            return;
+          if (removed.length > 0) applyServerDeletions(removed);
+        } catch (e) {
+          console.warn("pruneDeleted (mail:new) failed", e);
         }
       },
     );
@@ -422,6 +467,45 @@ export default function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [settingsOpen]);
+
+  // Backspace / Delete on the mailbox view: trash the selected message,
+  // or permanently delete (with confirm) when the user is already inside
+  // the Junk or Trash folder where "move to trash" makes no sense.
+  // Capture phase so the browser's default "navigate back" on Backspace
+  // can't pre-empt us, and so an iframe-focused body view still bubbles
+  // the event up before something else swallows it.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Backspace" && e.key !== "Delete") return;
+      if (screen !== "mailbox") return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return;
+        if (t.isContentEditable) return;
+      }
+      if (composeDraft || promptState || confirmState || settingsOpen) return;
+      // Suppress the browser's default action regardless of whether we can
+      // delete — otherwise focus on `body` lets Backspace navigate back.
+      e.preventDefault();
+      e.stopPropagation();
+      if (selectedUid === null || !selectedFolder) {
+        setStatus("삭제할 메일을 먼저 선택하세요");
+        return;
+      }
+      deleteSelectedFromKeyboard();
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [
+    screen,
+    selectedUid,
+    selectedFolder,
+    folders,
+    composeDraft,
+    promptState,
+    confirmState,
+    settingsOpen,
+  ]);
 
   async function handleConnect(e: React.FormEvent) {
     e.preventDefault();
@@ -481,6 +565,7 @@ export default function App() {
 
   async function handleSelectFolder(folder: Folder) {
     selectionGenRef.current++;
+    const gen = ++listGenRef.current;
     setSelectedFolder(folder.raw);
     setBody(null);
     setSelectedUid(null);
@@ -499,13 +584,16 @@ export default function App() {
         null,
         CACHED_INITIAL_CAP,
       );
+      if (listGenRef.current !== gen) return;
       setEnvelopes(cachedE);
     } catch (e) {
+      if (listGenRef.current !== gen) return;
       console.warn("cachedEnvelopes failed", e);
     }
 
     try {
       const envs = await api.fetchEnvelopes(folder.raw, 0, PAGE_SIZE);
+      if (listGenRef.current !== gen) return;
       let total = 0;
       setEnvelopes((prev) => {
         const merged = mergeEnvelopes(envs, prev);
@@ -515,13 +603,46 @@ export default function App() {
       setStatus(`${total} messages`);
       if (envs.length < PAGE_SIZE) setNoMore(true);
     } catch (err) {
+      if (listGenRef.current !== gen) return;
       setStatus(`Fetch failed: ${err}`);
     }
+
+    // Reconcile against server-side deletions for the UIDs the user can
+    // actually see (top 1000). Verifying everything cached would be
+    // prohibitively expensive on large mailboxes.
+    try {
+      const visibleUids = envelopesRef.current
+        .slice(0, 1000)
+        .map((e) => e.uid);
+      if (visibleUids.length === 0) return;
+      const removed = await api.pruneDeleted(folder.raw, visibleUids);
+      if (listGenRef.current !== gen) return;
+      if (removed.length > 0) {
+        applyServerDeletions(removed);
+      }
+    } catch (e) {
+      console.warn("pruneDeleted failed", e);
+    }
+  }
+
+  function applyServerDeletions(uids: number[]) {
+    if (uids.length === 0) return;
+    const removed = new Set(uids);
+    setEnvelopes((prev) => prev.filter((e) => !removed.has(e.uid)));
+    setSelectedUid((prev) => {
+      if (prev !== null && removed.has(prev)) {
+        setBody(null);
+        return null;
+      }
+      return prev;
+    });
+    setStatus(`서버에서 ${uids.length}건 삭제 감지 — 목록 정리`);
   }
 
   async function loadMore() {
     const folder = selectedFolderRef.current;
     if (!folder || loadingMore || noMore) return;
+    const gen = listGenRef.current;
     setLoadingMore(true);
     const current = envelopesRef.current;
     const oldestUid = current.length > 0 ? current[current.length - 1].uid : null;
@@ -534,10 +655,18 @@ export default function App() {
         oldestUid,
         PAGE_SIZE,
       );
+      if (listGenRef.current !== gen) {
+        setLoadingMore(false);
+        return;
+      }
       if (cachedE.length > 0) {
         setEnvelopes((prev) => mergeEnvelopes(prev, cachedE));
       }
     } catch (e) {
+      if (listGenRef.current !== gen) {
+        setLoadingMore(false);
+        return;
+      }
       console.warn("cachedEnvelopes (more) failed", e);
     }
 
@@ -545,6 +674,10 @@ export default function App() {
     try {
       const offset = envelopesRef.current.length;
       const envs = await api.fetchEnvelopes(folder, offset, PAGE_SIZE);
+      if (listGenRef.current !== gen) {
+        setLoadingMore(false);
+        return;
+      }
       if (envs.length === 0) {
         setNoMore(true);
       } else {
@@ -579,7 +712,82 @@ export default function App() {
     return () => observer.disconnect();
   }, [selectedFolder, loadingMore, noMore, account]);
 
+  // Background body prefetch: once envelopes are listed for the current
+  // folder, slowly walk the list and cache each body so a user click feels
+  // instant. Cancels cleanly on folder/account switch.
+  useEffect(() => {
+    if (!selectedFolder || !account.host || envelopes.length === 0) return;
+    const folder = selectedFolder;
+    const acc = account;
+    const key = `${accountKey(acc)}::${folder}`;
+    if (prefetchedBodiesRef.current.key !== key) {
+      prefetchedBodiesRef.current = { key, uids: new Set() };
+    }
+    const processed = prefetchedBodiesRef.current.uids;
+    const snapshot = envelopes.slice();
+    let cancelled = false;
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    const stillCurrent = () =>
+      !cancelled &&
+      selectedFolderRef.current === folder &&
+      accountKey(account) === accountKey(acc);
+
+    (async () => {
+      // Give the user a moment to click around before we start hitting IMAP.
+      await sleep(800);
+      for (const env of snapshot) {
+        if (!stillCurrent()) return;
+        // STORE / select / fetchBody initiated by the user must take
+        // priority over background body fetching. Yield until the
+        // pause window passes before each iteration.
+        while (
+          Date.now() < prefetchPausedUntilRef.current &&
+          stillCurrent()
+        ) {
+          await sleep(200);
+        }
+        if (!stillCurrent()) return;
+        if (processed.has(env.uid)) continue;
+        processed.add(env.uid);
+        try {
+          const cached = await api.cachedBody(acc, folder, env.uid);
+          if (!stillCurrent()) return;
+          if (cached) {
+            // Already on disk — yield briefly and move on.
+            await sleep(30);
+            continue;
+          }
+          if (!stillCurrent()) return;
+          await api.fetchBody(folder, env.uid);
+          if (!stillCurrent()) return;
+          await sleep(BODY_PREFETCH_INTERVAL_MS);
+        } catch (e) {
+          // Keep the uid in `processed` so a malformed/empty message
+          // doesn't get retried indefinitely on every envelope update.
+          console.warn("body prefetch failed", env.uid, e);
+          await sleep(BODY_PREFETCH_ERROR_BACKOFF_MS);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFolder, envelopes, account]);
+
+  function pausePrefetch(durationMs: number) {
+    const next = Date.now() + durationMs;
+    if (next > prefetchPausedUntilRef.current) {
+      prefetchPausedUntilRef.current = next;
+    }
+  }
+
   async function handleSelectMessage(uid: number) {
+    // Body prefetch yields so the follow-up STORE for mark-seen and any
+    // live fetchBody for this click hit the IMAP session immediately.
+    pausePrefetch(8000);
     const gen = ++selectionGenRef.current;
     const folder = selectedFolder;
     if (markSeenTimerRef.current !== null) {
@@ -636,6 +844,7 @@ export default function App() {
   }
 
   async function applyMarkSeen(folder: string, uid: number) {
+    pausePrefetch(5000);
     // Optimistic envelope + folder unread-count update.
     setEnvelopes((prev) =>
       prev.map((e) =>
@@ -768,19 +977,81 @@ export default function App() {
     }
   }
 
+  // Optimistically removes a UID from envelopes and server-search results,
+  // clears the body if it was the active selection, and returns a rollback
+  // closure for the caller to invoke if the underlying API call fails.
+  function optimisticallyRemove(uid: number): () => void {
+    const prevEnvelopes = envelopes;
+    const prevServerResults = serverResults;
+    const prevSelectedUid = selectedUid;
+    const prevBody = body;
+    setEnvelopes((prev) => prev.filter((e) => e.uid !== uid));
+    setServerResults((prev) =>
+      prev ? prev.filter((e) => e.uid !== uid) : prev,
+    );
+    if (selectedUid === uid) {
+      setSelectedUid(null);
+      setBody(null);
+    }
+    return () => {
+      setEnvelopes(prevEnvelopes);
+      setServerResults(prevServerResults);
+      if (prevSelectedUid === uid) {
+        setSelectedUid(prevSelectedUid);
+        setBody(prevBody);
+      }
+    };
+  }
+
   async function handleMoveToTrash(uid: number) {
     if (!selectedFolder) return;
     const ok = await askConfirm("이 메일을 휴지통으로 옮길까요?");
     if (!ok) return;
+    pausePrefetch(5000);
+    const rollback = optimisticallyRemove(uid);
+    setStatus("휴지통으로 이동 중…");
     try {
       await api.moveToTrash(selectedFolder, uid);
-      setEnvelopes((prev) => prev.filter((e) => e.uid !== uid));
-      if (selectedUid === uid) {
-        setBody(null);
-        setSelectedUid(null);
-      }
       setStatus("휴지통으로 이동");
     } catch (err) {
+      rollback();
+      setStatus(`삭제 실패: ${err}`);
+    }
+  }
+
+  async function deleteSelectedFromKeyboard() {
+    const uid = selectedUid;
+    const folder = selectedFolder;
+    if (uid === null || !folder) return;
+    const current = folders.find((f) => f.raw === folder);
+    const isProtected =
+      current?.special === "Junk" || current?.special === "Trash";
+    if (isProtected) {
+      const label = current?.special === "Junk" ? "스팸함" : "휴지통";
+      const ok = await askConfirm(
+        `${label}의 메일을 완전히 삭제합니다. 복구할 수 없습니다. 계속할까요?`,
+      );
+      if (!ok) return;
+      pausePrefetch(5000);
+      const rollback = optimisticallyRemove(uid);
+      setStatus("완전 삭제 중…");
+      try {
+        await api.deletePermanent(folder, uid);
+        setStatus("완전 삭제됨");
+      } catch (err) {
+        rollback();
+        setStatus(`완전 삭제 실패: ${err}`);
+      }
+      return;
+    }
+    pausePrefetch(5000);
+    const rollback = optimisticallyRemove(uid);
+    setStatus("휴지통으로 이동 중…");
+    try {
+      await api.moveToTrash(folder, uid);
+      setStatus("휴지통으로 이동");
+    } catch (err) {
+      rollback();
       setStatus(`삭제 실패: ${err}`);
     }
   }
@@ -807,6 +1078,11 @@ export default function App() {
 
   async function handleSwitchAccount(target: Account) {
     setSettingsOpen(false);
+    // Invalidate any envelope/body fetches still in flight for the
+    // previous account so their late results can't overwrite the new
+    // account's mailbox view.
+    listGenRef.current++;
+    selectionGenRef.current++;
     try {
       await api.disconnectImap();
     } catch (e) {
@@ -1654,6 +1930,164 @@ function SettingsModal(props: {
               </div>
             ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DebugWindowFrame() {
+  return (
+    <div
+      style={{
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        background: "#1b1b1b",
+        color: "#e0e0e0",
+        padding: "0.75rem",
+        boxSizing: "border-box",
+      }}
+    >
+      <DebugConsole />
+    </div>
+  );
+}
+
+function DebugConsole() {
+  const [entries, setEntries] = useState<api.DebugLogEntry[]>([]);
+  const [enabled, setEnabled] = useState<Record<string, boolean>>({
+    imap: true,
+    smtp: true,
+    idle: true,
+  });
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickyRef = useRef(true);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getDebugLog()
+      .then((snap) => {
+        if (alive) setEntries(snap);
+      })
+      .catch((e) => console.warn("getDebugLog failed", e));
+    const unlisten = listen<api.DebugLogEntry>("debug:log", (ev) => {
+      if (!alive) return;
+      setEntries((prev) => {
+        const next = prev.length >= 1000 ? prev.slice(-999) : prev.slice();
+        next.push(ev.payload);
+        return next;
+      });
+    });
+    return () => {
+      alive = false;
+      unlisten.then((u) => u()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!stickyRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries]);
+
+  function onScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    stickyRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  }
+
+  const visible = entries.filter((e) => enabled[e.channel] ?? true);
+
+  return (
+    <div className="modal-body debug-console">
+      <h3>Developer Console</h3>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "1.25rem",
+          marginBottom: "0.25rem",
+        }}
+      >
+        {["imap", "smtp", "idle"].map((ch) => (
+          <label
+            key={ch}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              whiteSpace: "nowrap",
+              cursor: "pointer",
+              userSelect: "none",
+              flexShrink: 0,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={enabled[ch] ?? true}
+              onChange={(e) =>
+                setEnabled((prev) => ({ ...prev, [ch]: e.target.checked }))
+              }
+              style={{
+                width: 14,
+                height: 14,
+                margin: 0,
+                marginRight: 8,
+                flexShrink: 0,
+              }}
+            />
+            {ch}
+          </label>
+        ))}
+        <button onClick={() => setEntries([])} style={{ flexShrink: 0 }}>
+          화면 비우기
+        </button>
+        <span style={{ marginLeft: "auto", opacity: 0.7, flexShrink: 0 }}>
+          {visible.length} / {entries.length}
+        </span>
+      </div>
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        style={{
+          marginTop: "0.5rem",
+          height: "55vh",
+          overflow: "auto",
+          background: "#111",
+          color: "#cfd8dc",
+          padding: "0.5rem",
+          fontFamily: "ui-monospace, Menlo, monospace",
+          fontSize: "12px",
+          lineHeight: 1.4,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+        }}
+      >
+        {visible.map((e) => {
+          const t = new Date(e.ts);
+          const hh = String(t.getHours()).padStart(2, "0");
+          const mm = String(t.getMinutes()).padStart(2, "0");
+          const ss = String(t.getSeconds()).padStart(2, "0");
+          const ms = String(t.getMilliseconds()).padStart(3, "0");
+          const color =
+            e.channel === "imap"
+              ? "#80cbc4"
+              : e.channel === "smtp"
+              ? "#ce93d8"
+              : "#ffe082";
+          return (
+            <div key={e.id}>
+              <span style={{ opacity: 0.6 }}>
+                {hh}:{mm}:{ss}.{ms}
+              </span>
+              <span style={{ color, marginLeft: 8 }}>
+                [{e.channel}]
+              </span>
+              <span style={{ marginLeft: 8 }}>{e.direction}</span>
+              <span style={{ marginLeft: 8 }}>{e.text}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
