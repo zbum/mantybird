@@ -156,6 +156,63 @@ export default function App() {
     folder: Folder | null;
   } | null>(null);
 
+  const SIDEBAR_MIN = 180;
+  const SIDEBAR_MAX = 480;
+  const LIST_MIN = 260;
+  const LIST_MAX = 720;
+  const VIEWER_MIN = 320;
+  const panesRef = useRef<HTMLDivElement | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("mb.sidebarWidth"));
+    return Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX ? v : 260;
+  });
+  const [listWidth, setListWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("mb.listWidth"));
+    return Number.isFinite(v) && v >= LIST_MIN && v <= LIST_MAX ? v : 360;
+  });
+  useEffect(() => {
+    localStorage.setItem("mb.sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+  useEffect(() => {
+    localStorage.setItem("mb.listWidth", String(listWidth));
+  }, [listWidth]);
+
+  function startResize(which: "sidebar" | "list") {
+    return (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startSidebar = sidebarWidth;
+      const startList = listWidth;
+      const containerW = panesRef.current?.clientWidth ?? 0;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        if (which === "sidebar") {
+          let next = startSidebar + dx;
+          next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, next));
+          const maxBySpace = containerW - startList - VIEWER_MIN - 10;
+          if (maxBySpace > SIDEBAR_MIN) next = Math.min(next, maxBySpace);
+          setSidebarWidth(next);
+        } else {
+          let next = startList + dx;
+          next = Math.max(LIST_MIN, Math.min(LIST_MAX, next));
+          const maxBySpace = containerW - startSidebar - VIEWER_MIN - 10;
+          if (maxBySpace > LIST_MIN) next = Math.min(next, maxBySpace);
+          setListWidth(next);
+        }
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    };
+  }
+
   function askPrompt(
     title: string,
     defaultValue = "",
@@ -1432,10 +1489,21 @@ export default function App() {
               </button>
             )}
           </header>
-          <div className="panes">
+          <div
+            className="panes"
+            ref={panesRef}
+            style={{
+              gridTemplateColumns: `${sidebarWidth}px 5px ${listWidth}px 5px 1fr`,
+            }}
+          >
             <div className="pane">
               {renderAccountTrees()}
             </div>
+            <div
+              className="pane-resizer"
+              onMouseDown={startResize("sidebar")}
+              title="드래그하여 너비 조절"
+            />
             <div className="pane">
               {displayedEnvelopes.map((e) => (
                 <div
@@ -1467,6 +1535,11 @@ export default function App() {
                     : ""}
               </div>
             </div>
+            <div
+              className="pane-resizer"
+              onMouseDown={startResize("list")}
+              title="드래그하여 너비 조절"
+            />
             <div className="pane viewer">
               {loadingBody ? (
                 <div className="empty">Loading…</div>

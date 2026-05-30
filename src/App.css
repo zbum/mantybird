@@ -113,8 +113,21 @@ input:focus {
 }
 .mailbox .panes {
   display: grid;
-  grid-template-columns: 260px 360px 1fr;
+  grid-template-columns: 260px 5px 360px 5px 1fr;
   min-height: 0;
+}
+.pane-resizer {
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid #353941;
+  border-right: 1px solid transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  user-select: none;
+}
+.pane-resizer:hover,
+.pane-resizer:active {
+  background: #3a5cff;
+  border-left-color: #3a5cff;
 }
 .mailbox footer.status {
   border-top: 1px solid #353941;
@@ -125,11 +138,7 @@ input:focus {
 
 .pane {
   overflow-y: auto;
-  border-right: 1px solid #353941;
   padding: 6px 0;
-}
-.pane:last-child {
-  border-right: none;
 }
 
 /* Context menu */
