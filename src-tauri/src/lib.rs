@@ -1095,11 +1095,37 @@ pub fn run() {
             load_password,
         ])
         .setup(|app| {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::Duration;
             use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-            use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+            use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+            use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
             if let Some(log) = debug_log::handle() {
                 log.bind(app.handle().clone());
+            }
+
+            // Debounced save of window position/size: the underlying plugin
+            // only persists to disk on RunEvent::Exit, which we lose on dev
+            // Ctrl+C or any abrupt termination. Schedule a save shortly
+            // after the user stops resizing/moving.
+            if let Some(win) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                let pending = Arc::new(AtomicBool::new(false));
+                win.on_window_event(move |event| match event {
+                    WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                        if !pending.swap(true, Ordering::SeqCst) {
+                            let h = app_handle.clone();
+                            let p = pending.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(800)).await;
+                                p.store(false, Ordering::SeqCst);
+                                let _ = h.save_window_state(StateFlags::all());
+                            });
+                        }
+                    }
+                    _ => {}
+                });
             }
 
             let preferences = MenuItemBuilder::new("환경설정...")
@@ -1143,7 +1169,7 @@ pub fn run() {
                         tracing::warn!(error = %e, "failed to open debug window");
                     }
                 }
-                "quit" => std::process::exit(0),
+                "quit" => app.exit(0),
                 _ => {}
             });
             Ok(())
