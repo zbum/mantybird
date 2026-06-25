@@ -258,14 +258,17 @@ fn parse_envelopes(fetched: Vec<async_imap::types::Fetch>) -> Vec<Envelope> {
         let seen = flags.iter().any(|s| s.eq_ignore_ascii_case("\\Seen"));
         let header_bytes = f.header().unwrap_or(&[]);
         let internal_date_str = f.internal_date().map(|d| d.to_rfc3339());
-        let (subject, from, date) = parse_header_summary(header_bytes, internal_date_str);
+        let summary = parse_header_summary(header_bytes, internal_date_str);
         envelopes.push(Envelope {
             uid,
             flags,
             seen,
-            subject,
-            from,
-            date,
+            subject: summary.subject,
+            from: summary.from,
+            date: summary.date,
+            message_id: summary.message_id,
+            in_reply_to: summary.in_reply_to,
+            references: summary.references,
         });
     }
     envelopes
@@ -307,7 +310,7 @@ pub async fn fetch_envelopes_by_uids(
     let stream = session
         .uid_fetch(
             uid_set,
-            "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])",
+            "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])",
         )
         .await
         .context("UID FETCH (search) failed")?;
@@ -339,7 +342,7 @@ pub async fn fetch_envelopes(
     let stream = session
         .fetch(
             range,
-            "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])",
+            "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])",
         )
         .await
         .context("FETCH headers failed")?;
@@ -352,24 +355,51 @@ pub async fn fetch_envelopes(
         let seen = flags.iter().any(|s| s.eq_ignore_ascii_case("\\Seen"));
         let header_bytes = f.header().unwrap_or(&[]);
         let internal_date_str = f.internal_date().map(|d| d.to_rfc3339());
-        let (subject, from, date) = parse_header_summary(header_bytes, internal_date_str);
+        let summary = parse_header_summary(header_bytes, internal_date_str);
         envelopes.push(Envelope {
             uid,
             flags,
             seen,
-            subject,
-            from,
-            date,
+            subject: summary.subject,
+            from: summary.from,
+            date: summary.date,
+            message_id: summary.message_id,
+            in_reply_to: summary.in_reply_to,
+            references: summary.references,
         });
     }
     envelopes.sort_by_key(|e| std::cmp::Reverse(e.uid));
     Ok(envelopes)
 }
 
+struct HeaderSummary {
+    subject: String,
+    from: String,
+    date: String,
+    message_id: Option<String>,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+}
+
+fn header_ids(value: &mail_parser::HeaderValue<'_>) -> Vec<String> {
+    value
+        .as_text_list()
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 fn parse_header_summary(
     raw_header: &[u8],
     internal_date: Option<String>,
-) -> (String, String, String) {
+) -> HeaderSummary {
     // Append the CRLF CRLF that ends the header section if not present,
     // so mail-parser treats input as a complete (header-only) message.
     let mut blob = raw_header.to_vec();
@@ -405,7 +435,51 @@ fn parse_header_summary(
         .map(|d| d.to_rfc3339())
         .or(internal_date)
         .unwrap_or_default();
-    (subject, from, date)
+    let message_id = parsed
+        .as_ref()
+        .and_then(|m| m.message_id())
+        .map(str::to_string);
+    let in_reply_to = parsed
+        .as_ref()
+        .and_then(|m| header_ids(m.in_reply_to()).into_iter().last());
+    let references = parsed
+        .as_ref()
+        .map(|m| header_ids(m.references()))
+        .unwrap_or_default();
+    HeaderSummary {
+        subject,
+        from,
+        date,
+        message_id,
+        in_reply_to,
+        references,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_header_summary;
+
+    #[test]
+    fn parses_thread_headers() {
+        let raw = concat!(
+            "Subject: Re: status\r\n",
+            "From: Alice <alice@example.com>\r\n",
+            "Message-ID: <child@example.com>\r\n",
+            "In-Reply-To: <parent@example.com>\r\n",
+            "References: <root@example.com> <parent@example.com>\r\n",
+            "\r\n",
+        );
+
+        let summary = parse_header_summary(raw.as_bytes(), None);
+
+        assert_eq!(summary.message_id.as_deref(), Some("child@example.com"));
+        assert_eq!(summary.in_reply_to.as_deref(), Some("parent@example.com"));
+        assert_eq!(
+            summary.references,
+            vec!["root@example.com", "parent@example.com"]
+        );
+    }
 }
 
 pub async fn fetch_body(
@@ -445,6 +519,9 @@ pub async fn fetch_body(
         })
         .unwrap_or_default();
     let date = parsed.date().map(|d| d.to_rfc3339()).unwrap_or_default();
+    let message_id = parsed.message_id().map(str::to_string);
+    let in_reply_to = header_ids(parsed.in_reply_to()).into_iter().last();
+    let references = header_ids(parsed.references());
 
     let raw_html = parsed.body_html(0).map(|h| h.into_owned());
     let html = raw_html.map(|h| inline_cid_images(&h, &parsed));
@@ -487,6 +564,9 @@ pub async fn fetch_body(
         text,
         html,
         attachments,
+        message_id,
+        in_reply_to,
+        references,
     })
 }
 

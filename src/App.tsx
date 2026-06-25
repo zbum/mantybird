@@ -30,6 +30,8 @@ interface ComposeDraft {
   body: string;
   isHtml: boolean;
   attachments: ComposeAttachment[];
+  inReplyTo: string | null;
+  references: string[];
 }
 
 const defaultAccount = (): Account => ({
@@ -62,6 +64,9 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchingServer, setSearchingServer] = useState(false);
   const [serverResults, setServerResults] = useState<Envelope[] | null>(null);
+  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(
+    new Set(),
+  );
 
   async function handleServerSearch() {
     if (!searchQuery.trim() || !selectedFolder) return;
@@ -190,6 +195,8 @@ export default function App() {
       body: "",
       isHtml: false,
       attachments: [],
+      inReplyTo: null,
+      references: [],
       ...(draft || {}),
     });
   }
@@ -205,6 +212,8 @@ export default function App() {
       subject,
       body,
       isHtml: true,
+      inReplyTo: b.message_id,
+      references: appendReference(b.references, b.message_id),
     });
   }
 
@@ -487,6 +496,7 @@ export default function App() {
     setEnvelopes([]);
     setNoMore(false);
     setServerResults(null);
+    setExpandedThreads(new Set());
     api.setLastMailbox(folder.raw).catch(() => {});
     setStatus(`Loading ${folder.leaf}…`);
 
@@ -991,6 +1001,20 @@ export default function App() {
     return envelopes;
   }, [serverResults, searchQuery, envelopes]);
 
+  const threads = useMemo(
+    () => buildThreads(displayedEnvelopes),
+    [displayedEnvelopes],
+  );
+  const visibleThreadEnvelopes = useMemo(
+    () =>
+      threads.flatMap((thread) =>
+        thread.messages.length > 1 && !expandedThreads.has(thread.id)
+          ? [thread.latest]
+          : thread.messages,
+      ),
+    [threads, expandedThreads],
+  );
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (screen !== "mailbox") return;
@@ -1013,7 +1037,7 @@ export default function App() {
         target?.isContentEditable
       )
         return;
-      const list = displayedEnvelopes;
+      const list = visibleThreadEnvelopes;
       if (list.length === 0) return;
       e.preventDefault();
       const currentIdx =
@@ -1040,7 +1064,7 @@ export default function App() {
     confirmState,
     pwPromptState,
     ctxMenu,
-    displayedEnvelopes,
+    visibleThreadEnvelopes,
     selectedUid,
   ]);
 
@@ -1161,26 +1185,77 @@ export default function App() {
               {renderAccountTrees()}
             </div>
             <div className="pane">
-              {displayedEnvelopes.map((e) => (
-                <div
-                  key={e.uid}
-                  data-uid={e.uid}
-                  className={`envelope ${selectedUid === e.uid ? "selected" : ""} ${e.seen ? "" : "unread"}`}
-                  onClick={() => handleSelectMessage(e.uid)}
-                >
-                  <div className="subject">
-                    {!e.seen && <span className="dot" />}
-                    {e.flags.some((f) => f.toLowerCase() === "\\flagged") && (
-                      <span className="star" title="중요">
-                        ★
-                      </span>
-                    )}
-                    {e.subject}
+              {threads.map((thread) => {
+                const isExpanded = expandedThreads.has(thread.id);
+                const visible =
+                  thread.messages.length > 1 && !isExpanded
+                    ? [thread.latest]
+                    : thread.messages;
+                return (
+                  <div className="thread" key={thread.id}>
+                    {visible.map((e, index) => {
+                      const isSummary =
+                        thread.messages.length > 1 && !isExpanded;
+                      const unread = isSummary
+                        ? thread.messages.some((message) => !message.seen)
+                        : !e.seen;
+                      const flagged = isSummary
+                        ? thread.messages.some((message) =>
+                            message.flags.some(
+                              (flag) =>
+                                flag.toLowerCase() === "\\flagged",
+                            ),
+                          )
+                        : e.flags.some(
+                            (flag) => flag.toLowerCase() === "\\flagged",
+                          );
+                      return (
+                        <div
+                          key={e.uid}
+                          data-uid={e.uid}
+                          className={`envelope ${thread.messages.length > 1 && isExpanded ? "thread-child" : ""} ${selectedUid === e.uid ? "selected" : ""} ${unread ? "unread" : ""}`}
+                          onClick={() => handleSelectMessage(e.uid)}
+                        >
+                          <div className="subject">
+                            {thread.messages.length > 1 && index === 0 && (
+                              <button
+                                type="button"
+                                className="thread-toggle"
+                                title={isExpanded ? "스레드 접기" : "스레드 펼치기"}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setExpandedThreads((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(thread.id)) next.delete(thread.id);
+                                    else next.add(thread.id);
+                                    return next;
+                                  });
+                                }}
+                              >
+                                {isExpanded ? "▼" : "▶"}
+                              </button>
+                            )}
+                            {unread && <span className="dot" />}
+                            {flagged && (
+                              <span className="star" title="중요">
+                                ★
+                              </span>
+                            )}
+                            {e.subject}
+                            {thread.messages.length > 1 && index === 0 && (
+                              <span className="thread-count">
+                                {thread.messages.length}
+                              </span>
+                            )}
+                          </div>
+                          <div className="meta">{e.from}</div>
+                          <div className="meta">{e.date}</div>
+                        </div>
+                      );
+                    })}
                   </div>
-                  <div className="meta">{e.from}</div>
-                  <div className="meta">{e.date}</div>
-                </div>
-              ))}
+                );
+              })}
               <div ref={sentinelRef} className="sentinel">
                 {loadingMore
                   ? "더 불러오는 중…"
@@ -1687,6 +1762,8 @@ function ComposeModal(props: {
           mime: a.mime,
           data_base64: a.data_base64,
         })),
+        inReplyTo: draft.inReplyTo,
+        references: draft.references,
       });
       props.onClose();
     } catch (err) {
@@ -2239,6 +2316,88 @@ function mergeEnvelopes(first: Envelope[], second: Envelope[]): Envelope[] {
     }
   }
   return out.sort((a, b) => b.uid - a.uid);
+}
+
+interface MailThread {
+  id: string;
+  latest: Envelope;
+  messages: Envelope[];
+}
+
+function normalizeMessageId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function appendReference(
+  references: string[],
+  messageId: string | null,
+): string[] {
+  const values = messageId ? [...references, messageId] : references;
+  return Array.from(
+    new Map(
+      values
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => [normalizeMessageId(value), value]),
+    ).values(),
+  );
+}
+
+function buildThreads(envelopes: Envelope[]): MailThread[] {
+  const parent = envelopes.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  const union = (left: number, right: number) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+  };
+  const ownerById = new Map<string, number>();
+
+  envelopes.forEach((envelope, index) => {
+    const ids = [
+      envelope.message_id,
+      envelope.in_reply_to,
+      ...envelope.references,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map(normalizeMessageId)
+      .filter(Boolean);
+    for (const id of new Set(ids)) {
+      const owner = ownerById.get(id);
+      if (owner === undefined) ownerById.set(id, index);
+      else union(index, owner);
+    }
+  });
+
+  const grouped = new Map<number, Envelope[]>();
+  envelopes.forEach((envelope, index) => {
+    const root = find(index);
+    const group = grouped.get(root) ?? [];
+    group.push(envelope);
+    grouped.set(root, group);
+  });
+
+  return Array.from(grouped.values())
+    .map((messages) => {
+      messages.sort((a, b) => a.uid - b.uid);
+      const latest = messages[messages.length - 1];
+      const id =
+        messages
+          .flatMap((message) => [
+            message.message_id,
+            message.in_reply_to,
+            ...message.references,
+          ])
+          .find((value): value is string => Boolean(value)) ?? `uid:${latest.uid}`;
+      return { id: normalizeMessageId(id), latest, messages };
+    })
+    .sort((a, b) => b.latest.uid - a.latest.uid);
 }
 
 function escapeHtml(s: string): string {

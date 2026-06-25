@@ -821,6 +821,8 @@ async fn send_mail(
     body: String,
     html: Option<String>,
     attachments: Vec<AttachmentPayload>,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
 ) -> Result<(), String> {
     let in_memory = state
         .current_account
@@ -878,6 +880,8 @@ async fn send_mail(
             body,
             html,
             attachments: decoded_attachments,
+            in_reply_to,
+            references,
         },
     )
     .await
