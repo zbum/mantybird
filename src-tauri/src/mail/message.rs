@@ -51,6 +51,12 @@ pub struct Envelope {
     pub date: String,
     pub flags: Vec<String>,
     pub seen: bool,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -73,4 +79,10 @@ pub struct MessageBody {
     pub html: Option<String>,
     #[serde(default)]
     pub attachments: Vec<AttachmentMeta>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }

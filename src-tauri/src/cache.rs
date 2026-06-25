@@ -132,14 +132,17 @@ impl Cache {
             let tx = guard.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO messages (account_key, mailbox, uid, subject, from_addr, date, flags, seen)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "INSERT INTO messages (account_key, mailbox, uid, subject, from_addr, date, flags, seen, message_id, in_reply_to, message_references)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                      ON CONFLICT(account_key, mailbox, uid) DO UPDATE SET
                        subject = excluded.subject,
                        from_addr = excluded.from_addr,
                        date = excluded.date,
                        flags = excluded.flags,
-                       seen = excluded.seen",
+                       seen = excluded.seen,
+                       message_id = excluded.message_id,
+                       in_reply_to = excluded.in_reply_to,
+                       message_references = excluded.message_references",
                 )?;
                 for e in &envelopes {
                     stmt.execute(params![
@@ -151,6 +154,9 @@ impl Cache {
                         e.date,
                         serde_json::to_string(&e.flags)?,
                         e.seen as i64,
+                        e.message_id,
+                        e.in_reply_to,
+                        serde_json::to_string(&e.references)?,
                     ])?;
                 }
             }
@@ -171,7 +177,7 @@ impl Cache {
         tokio::task::spawn_blocking(move || -> Result<Vec<Envelope>> {
             let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
             let mut stmt = guard.prepare(
-                "SELECT uid, subject, from_addr, date, flags, seen
+                "SELECT uid, subject, from_addr, date, flags, seen, message_id, in_reply_to, message_references
                  FROM messages
                  WHERE account_key = ?1 AND mailbox = ?2
                    AND (?3 IS NULL OR uid < ?3)
@@ -187,13 +193,20 @@ impl Cache {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, i64>(5)? != 0,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )?;
             let mut out = Vec::new();
             for r in rows {
-                let (uid, subject, from, date, flags_json, seen) = r?;
+                let (uid, subject, from, date, flags_json, seen, message_id, in_reply_to, references_json) = r?;
                 let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+                let references: Vec<String> = references_json
+                    .as_deref()
+                    .map(|value| serde_json::from_str(value).unwrap_or_default())
+                    .unwrap_or_default();
                 out.push(Envelope {
                     uid,
                     subject,
@@ -201,6 +214,9 @@ impl Cache {
                     date,
                     flags,
                     seen,
+                    message_id,
+                    in_reply_to,
+                    references,
                 });
             }
             Ok(out)
@@ -255,7 +271,8 @@ impl Cache {
                 "UPDATE messages SET
                    body_subject = ?4, body_from = ?5, body_to = ?6, body_date = ?7,
                    body_text = ?8, body_html = ?9, has_body = 1, body_fetched_at = ?10,
-                   body_attachments = ?11
+                   body_attachments = ?11, message_id = ?12, in_reply_to = ?13,
+                   message_references = ?14
                  WHERE account_key = ?1 AND mailbox = ?2 AND uid = ?3",
                 params![
                     account_key,
@@ -269,6 +286,9 @@ impl Cache {
                     body.html,
                     now,
                     attachments_json,
+                    body.message_id,
+                    body.in_reply_to,
+                    serde_json::to_string(&body.references)?,
                 ],
             )?;
             Ok(())
@@ -286,7 +306,8 @@ impl Cache {
         tokio::task::spawn_blocking(move || -> Result<Option<MessageBody>> {
             let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
             let mut stmt = guard.prepare(
-                "SELECT body_subject, body_from, body_to, body_date, body_text, body_html, body_attachments
+                "SELECT body_subject, body_from, body_to, body_date, body_text, body_html,
+                        body_attachments, message_id, in_reply_to, message_references
                  FROM messages
                  WHERE account_key = ?1 AND mailbox = ?2 AND uid = ?3 AND has_body = 1",
             )?;
@@ -297,6 +318,11 @@ impl Cache {
                         .as_deref()
                         .map(|s| serde_json::from_str(s).unwrap_or_default())
                         .unwrap_or_default();
+                    let references_json: Option<String> = row.get(9)?;
+                    let references = references_json
+                        .as_deref()
+                        .map(|value| serde_json::from_str(value).unwrap_or_default())
+                        .unwrap_or_default();
                     Ok(MessageBody {
                         subject: row.get(0)?,
                         from: row.get(1)?,
@@ -305,6 +331,9 @@ impl Cache {
                         text: row.get(4)?,
                         html: row.get(5)?,
                         attachments,
+                        message_id: row.get(7)?,
+                        in_reply_to: row.get(8)?,
+                        references,
                     })
                 })
                 .optional()?;
@@ -375,6 +404,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
             body_html TEXT,
             body_fetched_at INTEGER,
             body_attachments TEXT,
+            message_id TEXT,
+            in_reply_to TEXT,
+            message_references TEXT,
             PRIMARY KEY (account_key, mailbox, uid)
          );
 
@@ -392,6 +424,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE folders ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN message_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN in_reply_to TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN message_references TEXT",
         [],
     );
     Ok(())

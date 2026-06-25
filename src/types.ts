@@ -56,6 +56,9 @@ export interface Envelope {
   date: string;
   flags: string[];
   seen: boolean;
+  message_id: string | null;
+  in_reply_to: string | null;
+  references: string[];
 }
 
 export interface AttachmentMeta {
@@ -75,4 +78,7 @@ export interface MessageBody {
   text: string;
   html: string | null;
   attachments: AttachmentMeta[];
+  message_id: string | null;
+  in_reply_to: string | null;
+  references: string[];
 }

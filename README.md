@@ -23,6 +23,8 @@ Cross-platform IMAP desktop client built with **Tauri 2** (Rust backend) +
 - **Attachments**: list + download to a configurable folder
 - **Compose**: WYSIWYG editor (TipTap), Reply, file attachments, HTML body,
   Sent-folder APPEND for non-Gmail servers (Gmail saves server-side)
+- **Mail threads**: group conversations using `Message-ID`, `In-Reply-To`, and
+  `References`; replies preserve RFC threading headers
 - **Search**: client-side filter (current envelopes) + server-side
   `UID SEARCH CHARSET UTF-8 TEXT ...`
 - **Flag / read state**: mark read on open, toggle Flagged (`\Flagged`),
@@ -132,6 +134,18 @@ mantybird/
 Calendar (CalDAV) and contacts (CardDAV) are intentionally not in tree yet;
 the module layout reserves a parallel `calendar/` and `contacts/` slot for
 when they're added.
+
+---
+
+## Changelog
+
+### 2026-06-25 — `feature/thread-mail`
+
+- Group mailbox entries into expandable conversations using RFC
+  `Message-ID`, `In-Reply-To`, and `References` headers.
+- Persist thread metadata in SQLite with automatic migration for existing
+  caches, and preserve thread headers when sending replies.
+- Verified with `cargo test`, `npm run build`, and `git diff --check`.
 
 ---
 

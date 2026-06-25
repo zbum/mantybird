@@ -246,6 +246,8 @@ export function sendMail(args: {
   body: string;
   html: string | null;
   attachments: AttachmentPayload[];
+  inReplyTo: string | null;
+  references: string[];
 }): Promise<void> {
   return invoke("send_mail", args);
 }

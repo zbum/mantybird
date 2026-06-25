@@ -350,6 +350,33 @@ input:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.thread-toggle {
+  border: none;
+  background: transparent;
+  color: #9aa0a8;
+  padding: 0;
+  width: 14px;
+  font-size: 9px;
+  flex-shrink: 0;
+}
+.thread-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: #ffffff;
+}
+.thread-count {
+  margin-left: auto;
+  border-radius: 9px;
+  background: #3b414c;
+  color: #c5cad2;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.envelope.thread-child {
+  padding-left: 28px;
+  border-left: 2px solid #3b4658;
+}
 
 /* Viewer */
 .viewer {

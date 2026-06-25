@@ -21,6 +21,8 @@ pub struct OutgoingMail {
     pub body: String,
     pub html: Option<String>,
     pub attachments: Vec<OutgoingAttachment>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 pub fn parse_addresses(raw: &str) -> Result<Vec<Mailbox>> {
@@ -53,6 +55,11 @@ pub fn build_from(account: &Account) -> Result<Mailbox> {
         .with_context(|| format!("invalid From address: {mailbox}"))
 }
 
+fn format_message_id(value: &str) -> Option<String> {
+    let value = value.trim().trim_start_matches('<').trim_end_matches('>');
+    (!value.is_empty()).then(|| format!("<{value}>"))
+}
+
 fn build_message(mail: OutgoingMail) -> Result<Message> {
     let mut builder = Message::builder()
         .from(mail.from)
@@ -65,6 +72,21 @@ fn build_message(mail: OutgoingMail) -> Result<Message> {
     }
     for b in mail.bcc {
         builder = builder.bcc(b);
+    }
+    if let Some(in_reply_to) = mail
+        .in_reply_to
+        .as_deref()
+        .and_then(format_message_id)
+    {
+        builder = builder.in_reply_to(in_reply_to);
+    }
+    let references = mail
+        .references
+        .iter()
+        .filter_map(|value| format_message_id(value))
+        .collect::<Vec<_>>();
+    if !references.is_empty() {
+        builder = builder.references(references.join(" "));
     }
 
     let plain = SinglePart::builder()
@@ -149,4 +171,22 @@ pub fn auto_save_to_sent(account: &Account) -> bool {
     // Gmail / Googlemail save sent messages server-side automatically.
     let host = account.host.to_ascii_lowercase();
     !(host.ends_with("gmail.com") || host.ends_with("googlemail.com"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_message_id;
+
+    #[test]
+    fn formats_message_ids_for_rfc_headers() {
+        assert_eq!(
+            format_message_id("parent@example.com").as_deref(),
+            Some("<parent@example.com>")
+        );
+        assert_eq!(
+            format_message_id("<parent@example.com>").as_deref(),
+            Some("<parent@example.com>")
+        );
+        assert_eq!(format_message_id(""), None);
+    }
 }
