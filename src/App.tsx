@@ -865,10 +865,17 @@ export default function App() {
     setBody(null);
     setLoadingBody(true);
     if (folder) {
+      // The configured delay starts when the user selects the message, not
+      // after a potentially slow cache lookup or full-body IMAP fetch.
+      scheduleMarkSeen(gen, folder, uid);
+    }
+    let hasCachedBody = false;
+    if (folder) {
       try {
         const cached = await api.cachedBody(account, folder, uid);
         if (selectionGenRef.current !== gen) return;
         if (cached) {
+          hasCachedBody = true;
           setBody(cached);
           setLoadingBody(false);
         }
@@ -881,6 +888,12 @@ export default function App() {
       if (selectionGenRef.current === gen) setLoadingBody(false);
       return;
     }
+    const selectedFolderInfo = folders.find((item) => item.raw === folder);
+    const shouldRefreshFromServer =
+      !hasCachedBody || selectedFolderInfo?.special === "Drafts";
+    if (!shouldRefreshFromServer) {
+      return;
+    }
     try {
       const b = await api.fetchBody(folder, uid);
       if (selectionGenRef.current !== gen) return;
@@ -891,7 +904,6 @@ export default function App() {
     } finally {
       if (selectionGenRef.current === gen) setLoadingBody(false);
     }
-    scheduleMarkSeen(gen, folder, uid);
   }
 
   function scheduleMarkSeen(gen: number, folder: string, uid: number) {
@@ -1685,6 +1697,10 @@ export default function App() {
           currentAccount={account}
           onClose={() => setSettingsOpen(false)}
           onSwitch={handleSwitchAccount}
+          onMarkSeenDelayChange={(seconds) => {
+            markSeenDelayRef.current = seconds;
+            setMarkSeenDelay(seconds);
+          }}
         />
       )}
       {composeDraft && (
@@ -1767,6 +1783,7 @@ function SettingsModal(props: {
   currentAccount: Account;
   onClose: () => void;
   onSwitch: (acc: Account) => Promise<void>;
+  onMarkSeenDelayChange: (seconds: number) => void;
 }) {
   const [config, setConfig] = useState<StoredConfig | null>(null);
   const [editing, setEditing] = useState<Account | null>(null);
@@ -1930,6 +1947,7 @@ function SettingsModal(props: {
                       const n = config?.mark_seen_delay_seconds ?? 0;
                       const c = await api.setMarkSeenDelay(n);
                       setConfig(c);
+                      props.onMarkSeenDelayChange(c.mark_seen_delay_seconds);
                       setMsg("저장됨");
                     } catch (e) {
                       setMsg(`저장 실패: ${e}`);

@@ -139,6 +139,15 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-25 — `bugfix/mark-seen-delay`
+
+- Start the configured read-state delay when a message is selected, so a
+  zero-second delay marks it read immediately even during rapid navigation.
+- Apply saved delay settings to the active mailbox view immediately.
+- Reuse cached message bodies without a redundant server fetch, except for
+  Drafts where server refresh remains enabled.
+- Verified with `cargo test`, `npm run build`, and `git diff --check`.
+
 ### 2026-06-25 — `feature/thread-mail`
 
 - Group mailbox entries into expandable conversations using RFC
