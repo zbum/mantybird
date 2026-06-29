@@ -44,6 +44,8 @@ export interface Folder {
   depth: number;
   parent_path: string | null;
   has_children: boolean;
+  no_select: boolean;
+  no_inferiors: boolean;
   special: SpecialUse;
   subscribed: boolean;
   unread_count: number;

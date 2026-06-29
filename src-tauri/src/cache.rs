@@ -44,8 +44,8 @@ impl Cache {
             )?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO folders (account_key, raw, leaf, depth, parent_path, has_children, special, ord, subscribed, unread_count)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO folders (account_key, raw, leaf, depth, parent_path, has_children, no_select, no_inferiors, special, ord, subscribed, unread_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?;
                 for (i, f) in folders.iter().enumerate() {
                     stmt.execute(params![
@@ -55,6 +55,8 @@ impl Cache {
                         f.depth,
                         f.parent_path,
                         f.has_children as i64,
+                        f.no_select as i64,
+                        f.no_inferiors as i64,
                         serde_json::to_string(&f.special)?,
                         i as i64,
                         f.subscribed as i64,
@@ -91,22 +93,27 @@ impl Cache {
         tokio::task::spawn_blocking(move || -> Result<Vec<Folder>> {
             let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
             let mut stmt = guard.prepare(
-                "SELECT raw, leaf, depth, parent_path, has_children, special,
+                "SELECT raw, leaf, depth, parent_path, has_children,
+                        COALESCE(no_select, 0) AS no_select,
+                        COALESCE(no_inferiors, 0) AS no_inferiors,
+                        special,
                         COALESCE(subscribed, 1) AS subscribed,
                         COALESCE(unread_count, 0) AS unread_count
                  FROM folders WHERE account_key = ?1 ORDER BY ord",
             )?;
             let rows = stmt.query_map(params![account_key], |row| {
-                let special_json: String = row.get(5)?;
+                let special_json: String = row.get(7)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)? as u16,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, i64>(4)? != 0,
-                    special_json,
+                    row.get::<_, i64>(5)? != 0,
                     row.get::<_, i64>(6)? != 0,
-                    row.get::<_, i64>(7)? as u32,
+                    special_json,
+                    row.get::<_, i64>(8)? != 0,
+                    row.get::<_, i64>(9)? as u32,
                 ))
             })?;
             let mut out = Vec::new();
@@ -117,6 +124,8 @@ impl Cache {
                     depth,
                     parent_path,
                     has_children,
+                    no_select,
+                    no_inferiors,
                     special_json,
                     subscribed,
                     unread_count,
@@ -128,6 +137,8 @@ impl Cache {
                     depth,
                     parent_path,
                     has_children,
+                    no_select,
+                    no_inferiors,
                     special,
                     subscribed,
                     unread_count,
@@ -397,6 +408,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             depth INTEGER NOT NULL,
             parent_path TEXT,
             has_children INTEGER NOT NULL,
+            no_select INTEGER NOT NULL DEFAULT 0,
+            no_inferiors INTEGER NOT NULL DEFAULT 0,
             special TEXT NOT NULL,
             ord INTEGER NOT NULL,
             subscribed INTEGER NOT NULL DEFAULT 1,
@@ -442,6 +455,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE folders ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE folders ADD COLUMN no_select INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE folders ADD COLUMN no_inferiors INTEGER NOT NULL DEFAULT 0",
         [],
     );
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN message_id TEXT", []);

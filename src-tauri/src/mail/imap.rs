@@ -185,6 +185,10 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<Folder>> {
                 .attributes()
                 .iter()
                 .any(|a| matches!(a, NameAttribute::NoSelect));
+            let no_inferiors = n
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, NameAttribute::NoInferiors));
             (
                 Folder {
                     raw,
@@ -192,6 +196,8 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<Folder>> {
                     depth,
                     parent_path,
                     has_children: false,
+                    no_select,
+                    no_inferiors,
                     special,
                     subscribed,
                     unread_count: 0,

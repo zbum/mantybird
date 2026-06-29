@@ -139,6 +139,14 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-29 — `feature/folder-list-attributes`
+
+- Preserve IMAP `\NoSelect` and `\NoInferiors` LIST attributes in the folder
+  model and local cache.
+- Prevent selecting `\NoSelect` hierarchy nodes as mailboxes, and prevent
+  creating child folders under `\NoInferiors` or special-use folders.
+- Verified with `cargo test` and `npm run build`.
+
 ### 2026-06-29 — `feature/refresh-mailbox-counts`
 
 - Refresh the selected mailbox unread badge from server `STATUS (UNSEEN)`
