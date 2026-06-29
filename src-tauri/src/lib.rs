@@ -707,6 +707,13 @@ async fn move_to_trash(
         Box::pin(async move { imap_client::move_message(sess, &mb, uid, &t).await })
     })
     .await?;
+    if let Err(e) = state
+        .cache
+        .delete_messages(key, mailbox, vec![uid])
+        .await
+    {
+        warn!(error = %e, "cache delete_messages after move_to_trash failed");
+    }
     Ok(())
 }
 
@@ -823,6 +830,29 @@ async fn delete_mailbox(
     })
     .await?;
     refresh_folders(&state).await
+}
+
+#[tauri::command]
+async fn refresh_mailbox_count(
+    state: State<'_, AppState>,
+    mailbox: String,
+) -> Result<u32, String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    let mailbox_for_status = mailbox.clone();
+    let unread_count = with_imap(&state, move |sess| {
+        let mb = mailbox_for_status.clone();
+        Box::pin(async move { imap_client::unread_count(sess, &mb).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .set_folder_unread_count(key, mailbox, unread_count)
+        .await
+    {
+        warn!(error = %e, "cache unread-count refresh failed");
+    }
+    Ok(unread_count)
 }
 
 async fn refresh_folders(state: &AppState) -> Result<Vec<Folder>, String> {
@@ -1084,6 +1114,7 @@ pub fn run() {
             create_mailbox,
             rename_mailbox,
             delete_mailbox,
+            refresh_mailbox_count,
             subscribe_mailbox,
             unsubscribe_mailbox,
             cached_folders,

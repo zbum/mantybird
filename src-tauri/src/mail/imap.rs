@@ -220,6 +220,17 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<Folder>> {
     Ok(sorted)
 }
 
+pub async fn unread_count(session: &mut ImapSession, mailbox: &str) -> Result<u32> {
+    crate::debug_log::push("imap", "→", format!("STATUS {:?} (UNSEEN)", mailbox));
+    let mbox = session
+        .status(mailbox, "(UNSEEN)")
+        .await
+        .context("STATUS UNSEEN failed")?;
+    let count = mbox.unseen.unwrap_or(0);
+    crate::debug_log::push("imap", "←", format!("STATUS OK — unseen={}", count));
+    Ok(count)
+}
+
 fn sort_folder_tree(mut folders: Vec<Folder>) -> Vec<Folder> {
     let n = folders.len();
     let path_to_idx: HashMap<String, usize> = folders

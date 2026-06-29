@@ -224,6 +224,10 @@ export function deleteMailbox(raw: string): Promise<Folder[]> {
   return invoke("delete_mailbox", { raw });
 }
 
+export function refreshMailboxCount(mailbox: string): Promise<number> {
+  return invoke("refresh_mailbox_count", { mailbox });
+}
+
 export function subscribeMailbox(raw: string): Promise<Folder[]> {
   return invoke("subscribe_mailbox", { raw });
 }

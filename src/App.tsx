@@ -674,6 +674,10 @@ export default function App() {
       setStatus(`Fetch failed: ${err}`);
     }
 
+    refreshFolderUnreadCount(folder.raw).catch((e) =>
+      console.warn("refreshFolderUnreadCount failed", e),
+    );
+
     // Reconcile against server-side deletions for the UIDs the user can
     // actually see (top 1000). Verifying everything cached would be
     // prohibitively expensive on large mailboxes.
@@ -704,6 +708,20 @@ export default function App() {
       return prev;
     });
     setStatus(`서버에서 ${uids.length}건 삭제 감지 — 목록 정리`);
+  }
+
+  async function refreshFolderUnreadCount(raw: string): Promise<void> {
+    const unreadCount = await api.refreshMailboxCount(raw);
+    setFolders((prev) =>
+      prev.map((f) =>
+        f.raw === raw ? { ...f, unread_count: unreadCount } : f,
+      ),
+    );
+  }
+
+  async function refreshFolderUnreadCounts(raws: string[]): Promise<void> {
+    const unique = Array.from(new Set(raws.filter(Boolean)));
+    await Promise.all(unique.map((raw) => refreshFolderUnreadCount(raw)));
   }
 
   async function loadMore() {
@@ -952,6 +970,9 @@ export default function App() {
           e.uid === uid ? { ...e, flags: newFlags, seen: true } : e,
         ),
       );
+      refreshFolderUnreadCount(folder).catch((e) =>
+        console.warn("refreshFolderUnreadCount after markSeen failed", e),
+      );
     } catch (err) {
       console.warn("markSeen failed; rolling back", err);
       setEnvelopes((prev) =>
@@ -1084,13 +1105,18 @@ export default function App() {
 
   async function handleMoveToTrash(uid: number) {
     if (!selectedFolder) return;
+    const sourceFolder = selectedFolder;
+    const trashFolder = folders.find((f) => f.special === "Trash")?.raw;
     const ok = await askConfirm("이 메일을 휴지통으로 옮길까요?");
     if (!ok) return;
     pausePrefetch(5000);
     const rollback = optimisticallyRemove(uid);
     setStatus("휴지통으로 이동 중…");
     try {
-      await api.moveToTrash(selectedFolder, uid);
+      await api.moveToTrash(sourceFolder, uid);
+      await refreshFolderUnreadCounts(
+        trashFolder ? [sourceFolder, trashFolder] : [sourceFolder],
+      );
       setStatus("휴지통으로 이동");
     } catch (err) {
       rollback();
@@ -1116,6 +1142,7 @@ export default function App() {
       setStatus("완전 삭제 중…");
       try {
         await api.deletePermanent(folder, uid);
+        await refreshFolderUnreadCount(folder);
         setStatus("완전 삭제됨");
       } catch (err) {
         rollback();
@@ -1125,9 +1152,13 @@ export default function App() {
     }
     pausePrefetch(5000);
     const rollback = optimisticallyRemove(uid);
+    const trashFolder = folders.find((f) => f.special === "Trash")?.raw;
     setStatus("휴지통으로 이동 중…");
     try {
       await api.moveToTrash(folder, uid);
+      await refreshFolderUnreadCounts(
+        trashFolder ? [folder, trashFolder] : [folder],
+      );
       setStatus("휴지통으로 이동");
     } catch (err) {
       rollback();
