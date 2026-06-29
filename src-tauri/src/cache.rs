@@ -68,6 +68,24 @@ impl Cache {
         .await?
     }
 
+    pub async fn set_folder_unread_count(
+        &self,
+        account_key: String,
+        mailbox: String,
+        unread_count: u32,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
+            guard.execute(
+                "UPDATE folders SET unread_count = ?3 WHERE account_key = ?1 AND raw = ?2",
+                params![account_key, mailbox, unread_count as i64],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
     pub async fn get_folders(&self, account_key: String) -> Result<Vec<Folder>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Folder>> {

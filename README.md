@@ -139,6 +139,14 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-29 — `feature/refresh-mailbox-counts`
+
+- Refresh the selected mailbox unread badge from server `STATUS (UNSEEN)`
+  when opening a mailbox.
+- Refresh source and Trash unread badges after moving or deleting mail, and
+  persist the updated count in the local folder cache.
+- Verified with `cargo test` and `npm run build`.
+
 ### 2026-06-25 — `bugfix/mark-seen-delay`
 
 - Start the configured read-state delay when a message is selected, so a
