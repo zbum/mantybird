@@ -139,6 +139,14 @@ export function markSeen(
   return invoke("mark_seen", { mailbox, uid, seen });
 }
 
+export function markMailboxSeen(mailbox: string): Promise<number> {
+  return invoke("mark_mailbox_seen", { mailbox });
+}
+
+export function deleteMailboxMessages(mailbox: string): Promise<number> {
+  return invoke("delete_mailbox_messages", { mailbox });
+}
+
 export function setFlag(
   mailbox: string,
   uid: number,

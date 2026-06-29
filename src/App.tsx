@@ -1070,6 +1070,76 @@ export default function App() {
     }
   }
 
+  async function handleMarkMailboxSeen(folder: Folder) {
+    if (folder.no_select) return;
+    const ok = await askConfirm(`'${folder.leaf}' 폴더의 모든 메일을 읽음으로 표시할까요?`);
+    if (!ok) return;
+    pausePrefetch(5000);
+    setStatus("모두 읽음 처리 중…");
+    try {
+      const marked = await api.markMailboxSeen(folder.raw);
+      setFolders((prev) =>
+        prev.map((f) =>
+          f.raw === folder.raw ? { ...f, unread_count: 0 } : f,
+        ),
+      );
+      if (selectedFolder === folder.raw) {
+        setEnvelopes((prev) =>
+          prev.map((e) => ({
+            ...e,
+            seen: true,
+            flags: e.flags.some((f) => f.toLowerCase() === "\\seen")
+              ? e.flags
+              : [...e.flags, "\\Seen"],
+          })),
+        );
+        setServerResults((prev) =>
+          prev
+            ? prev.map((e) => ({
+                ...e,
+                seen: true,
+                flags: e.flags.some((f) => f.toLowerCase() === "\\seen")
+                  ? e.flags
+                  : [...e.flags, "\\Seen"],
+              }))
+            : prev,
+        );
+      }
+      setStatus(`${marked}건 읽음 처리`);
+    } catch (err) {
+      setStatus(`모두 읽음 실패: ${err}`);
+    }
+  }
+
+  async function handleDeleteMailboxMessages(folder: Folder) {
+    if (folder.no_select) return;
+    const ok = await askConfirm(
+      `'${folder.leaf}' 폴더의 모든 메일을 완전히 삭제할까요?\n이 작업은 서버에서 EXPUNGE되어 복구하기 어렵습니다.`,
+    );
+    if (!ok) return;
+    pausePrefetch(5000);
+    setStatus("폴더 메일 전체 삭제 중…");
+    try {
+      const deleted = await api.deleteMailboxMessages(folder.raw);
+      setFolders((prev) =>
+        prev.map((f) =>
+          f.raw === folder.raw ? { ...f, unread_count: 0 } : f,
+        ),
+      );
+      if (selectedFolder === folder.raw) {
+        selectionGenRef.current++;
+        setEnvelopes([]);
+        setServerResults(null);
+        setSelectedUid(null);
+        setBody(null);
+        setNoMore(true);
+      }
+      setStatus(`${deleted}건 삭제됨`);
+    } catch (err) {
+      setStatus(`전체 삭제 실패: ${err}`);
+    }
+  }
+
   async function handleToggleFlag(uid: number) {
     if (!selectedFolder) return;
     const env = envelopes.find((e) => e.uid === uid);
@@ -1808,6 +1878,16 @@ export default function App() {
             const f = ctxMenu.folder;
             setCtxMenu(null);
             if (f) handleDeleteMailbox(f);
+          }}
+          onMarkAllRead={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleMarkMailboxSeen(f);
+          }}
+          onDeleteAllMessages={() => {
+            const f = ctxMenu.folder;
+            setCtxMenu(null);
+            if (f) handleDeleteMailboxMessages(f);
           }}
           onSubscribe={() => {
             const f = ctxMenu.folder;
@@ -2660,6 +2740,8 @@ function FolderContextMenu(props: {
   onNewChild: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onMarkAllRead: () => void;
+  onDeleteAllMessages: () => void;
   onSubscribe: () => void;
   onUnsubscribe: () => void;
 }) {
@@ -2667,6 +2749,7 @@ function FolderContextMenu(props: {
   const locked = !isRoot && props.folder!.special !== "Other";
   const cannotCreateChild =
     !isRoot && (locked || props.folder!.no_inferiors);
+  const cannotBulkChange = !isRoot && props.folder!.no_select;
   return (
     <div
       className="ctx-menu"
@@ -2684,6 +2767,13 @@ function FolderContextMenu(props: {
           </button>
           <button onClick={props.onDelete} disabled={locked}>
             삭제
+          </button>
+          <div className="ctx-sep" />
+          <button onClick={props.onMarkAllRead} disabled={cannotBulkChange}>
+            모두 읽음
+          </button>
+          <button onClick={props.onDeleteAllMessages} disabled={cannotBulkChange}>
+            메일 전체 삭제
           </button>
           <div className="ctx-sep" />
           {props.folder!.subscribed ? (

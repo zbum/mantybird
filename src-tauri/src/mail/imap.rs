@@ -1074,3 +1074,53 @@ pub async fn mark_seen(
     );
     Ok(flags)
 }
+
+pub async fn mark_all_seen(session: &mut ImapSession, mailbox: &str) -> Result<u32> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
+    let mb = session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("SELECT OK exists={}", mb.exists),
+    );
+    if mb.exists == 0 {
+        return Ok(0);
+    }
+    crate::debug_log::push("imap", "→", "UID STORE 1:* +FLAGS (\\Seen)");
+    let stream = session
+        .uid_store("1:*", "+FLAGS (\\Seen)")
+        .await
+        .context("STORE \\Seen failed")?;
+    let results: Vec<_> = stream.try_collect().await?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("UID STORE OK — {} responses", results.len()),
+    );
+    Ok(mb.exists)
+}
+
+pub async fn delete_all_messages(session: &mut ImapSession, mailbox: &str) -> Result<u32> {
+    crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
+    let mb = session.select(mailbox).await.context("SELECT failed")?;
+    crate::debug_log::push(
+        "imap",
+        "←",
+        format!("SELECT OK exists={}", mb.exists),
+    );
+    if mb.exists == 0 {
+        return Ok(0);
+    }
+    crate::debug_log::push("imap", "→", "UID STORE 1:* +FLAGS (\\Deleted)");
+    let stream = session
+        .uid_store("1:*", "+FLAGS (\\Deleted)")
+        .await
+        .context("STORE \\Deleted failed")?;
+    let _ = stream.try_collect::<Vec<_>>().await?;
+    crate::debug_log::push("imap", "←", "UID STORE OK");
+    crate::debug_log::push("imap", "→", "EXPUNGE");
+    let exp = session.expunge().await.context("EXPUNGE failed")?;
+    let _ = exp.try_collect::<Vec<_>>().await?;
+    crate::debug_log::push("imap", "←", "EXPUNGE OK");
+    Ok(mb.exists)
+}
