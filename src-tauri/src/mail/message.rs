@@ -32,6 +32,10 @@ pub struct Folder {
     pub depth: u16,
     pub parent_path: Option<String>,
     pub has_children: bool,
+    #[serde(default)]
+    pub no_select: bool,
+    #[serde(default)]
+    pub no_inferiors: bool,
     pub special: SpecialUse,
     #[serde(default = "default_true")]
     pub subscribed: bool,

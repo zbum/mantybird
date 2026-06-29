@@ -750,6 +750,19 @@ async fn create_mailbox(
     parent_raw: Option<String>,
     name: String,
 ) -> Result<Vec<Folder>, String> {
+    if let Some(parent) = parent_raw.as_deref().filter(|p| !p.is_empty()) {
+        let account = ensure_account_loaded(&state).await?;
+        let folders = state
+            .cache
+            .get_folders(config::account_key(&account))
+            .await
+            .map_err(|e| e.to_string())?;
+        if folders.iter().any(|f| {
+            f.raw == parent && (f.no_inferiors || !matches!(f.special, SpecialUse::Other))
+        }) {
+            return Err("서버가 이 폴더 아래 하위 폴더 생성을 금지했습니다.".to_string());
+        }
+    }
     let delim = state.delimiter.lock().await.clone();
     let leaf_raw = utf7_imap::encode_utf7_imap(name);
     let raw = match parent_raw.as_deref() {

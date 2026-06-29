@@ -274,6 +274,9 @@ input:focus {
   color: #6f7682;
   font-style: italic;
 }
+.folder.no-select .leaf {
+  color: #8b929d;
+}
 .folder.has-unread .leaf {
   font-weight: 700;
   color: #ffffff;

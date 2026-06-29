@@ -630,6 +630,13 @@ export default function App() {
   }
 
   async function handleSelectFolder(folder: Folder) {
+    if (folder.no_select) {
+      if (folder.has_children) {
+        toggleFolder(folder.raw);
+      }
+      setStatus(`선택할 수 없는 폴더: ${folder.leaf}`);
+      return;
+    }
     selectionGenRef.current++;
     const gen = ++listGenRef.current;
     setSelectedFolder(folder.raw);
@@ -1009,6 +1016,14 @@ export default function App() {
   }
 
   async function handleCreateMailbox(parent?: Folder) {
+    if (parent && parent.special !== "Other") {
+      setStatus(`특수 폴더 아래에는 하위 폴더를 만들 수 없습니다: ${parent.leaf}`);
+      return;
+    }
+    if (parent?.no_inferiors) {
+      setStatus(`하위 폴더 생성 불가: ${parent.leaf}`);
+      return;
+    }
     const title = parent
       ? `${parent.leaf} 안에 새 하위 폴더`
       : "새 폴더";
@@ -1249,7 +1264,7 @@ export default function App() {
     const folderEl = (
       <div
         key={f.raw}
-        className={`folder ${selectedFolder === f.raw && isCurrent ? "selected" : ""} ${f.subscribed ? "" : "unsubscribed"} ${f.unread_count > 0 ? "has-unread" : ""}`}
+        className={`folder ${selectedFolder === f.raw && isCurrent ? "selected" : ""} ${f.subscribed ? "" : "unsubscribed"} ${f.unread_count > 0 ? "has-unread" : ""} ${f.no_select ? "no-select" : ""}`}
         style={{ paddingLeft: 8 + f.depth * 14 }}
         onClick={async () => {
           if (!isCurrent) {
@@ -2650,6 +2665,8 @@ function FolderContextMenu(props: {
 }) {
   const isRoot = props.folder === null;
   const locked = !isRoot && props.folder!.special !== "Other";
+  const cannotCreateChild =
+    !isRoot && (locked || props.folder!.no_inferiors);
   return (
     <div
       className="ctx-menu"
@@ -2657,7 +2674,7 @@ function FolderContextMenu(props: {
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
     >
-      <button onClick={props.onNewChild}>
+      <button onClick={props.onNewChild} disabled={cannotCreateChild}>
         {isRoot ? "새 폴더" : "새 하위 폴더"}
       </button>
       {!isRoot && (
