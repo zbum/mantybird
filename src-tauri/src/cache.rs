@@ -281,6 +281,23 @@ impl Cache {
         .await?
     }
 
+    pub async fn delete_mailbox_messages(
+        &self,
+        account_key: String,
+        mailbox: String,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
+            guard.execute(
+                "DELETE FROM messages WHERE account_key = ?1 AND mailbox = ?2",
+                params![account_key, mailbox],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
     pub async fn put_body(
         &self,
         account_key: String,
@@ -392,6 +409,23 @@ impl Cache {
                     seen as i64,
                     serde_json::to_string(&flags)?,
                 ],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    pub async fn set_mailbox_seen(
+        &self,
+        account_key: String,
+        mailbox: String,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let guard = conn.lock().map_err(|_| anyhow!("cache mutex poisoned"))?;
+            guard.execute(
+                "UPDATE messages SET seen = 1 WHERE account_key = ?1 AND mailbox = ?2",
+                params![account_key, mailbox],
             )?;
             Ok(())
         })

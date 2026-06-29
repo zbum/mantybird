@@ -139,6 +139,14 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-29 — `feature/folder-bulk-actions`
+
+- Add folder context-menu actions for marking every message in a folder as
+  read and permanently deleting every message in a folder.
+- Keep envelope lists, unread badges, and the local message cache in sync
+  after bulk folder actions.
+- Verified with `cargo test` and `npm run build`.
+
 ### 2026-06-29 — `feature/folder-list-attributes`
 
 - Preserve IMAP `\NoSelect` and `\NoInferiors` LIST attributes in the folder

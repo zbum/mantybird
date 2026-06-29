@@ -745,6 +745,60 @@ async fn mark_seen(
 }
 
 #[tauri::command]
+async fn mark_mailbox_seen(
+    state: State<'_, AppState>,
+    mailbox: String,
+) -> Result<u32, String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+    let mailbox_owned = mailbox.clone();
+    let marked = with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        Box::pin(async move { imap_client::mark_all_seen(sess, &mb).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .set_mailbox_seen(key.clone(), mailbox.clone())
+        .await
+    {
+        warn!(error = %e, "cache set_mailbox_seen failed");
+    }
+    if let Err(e) = state.cache.set_folder_unread_count(key, mailbox, 0).await {
+        warn!(error = %e, "cache unread-count reset after mark_mailbox_seen failed");
+    }
+    Ok(marked)
+}
+
+#[tauri::command]
+async fn delete_mailbox_messages(
+    state: State<'_, AppState>,
+    mailbox: String,
+) -> Result<u32, String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+    let mailbox_owned = mailbox.clone();
+    let deleted = with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        Box::pin(async move { imap_client::delete_all_messages(sess, &mb).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .delete_mailbox_messages(key.clone(), mailbox.clone())
+        .await
+    {
+        warn!(error = %e, "cache delete_mailbox_messages failed");
+    }
+    if let Err(e) = state.cache.set_folder_unread_count(key, mailbox, 0).await {
+        warn!(error = %e, "cache unread-count reset after delete_mailbox_messages failed");
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
 async fn create_mailbox(
     state: State<'_, AppState>,
     parent_raw: Option<String>,
@@ -1121,6 +1175,8 @@ pub fn run() {
             open_url,
             reveal_in_file_manager,
             mark_seen,
+            mark_mailbox_seen,
+            delete_mailbox_messages,
             set_flag,
             move_to_trash,
             delete_permanent,
