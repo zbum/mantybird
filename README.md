@@ -78,14 +78,21 @@ see the `Makefile` for the full list of targets.
 ### Cross-platform packaging
 
 ```bash
-make targets-install      # one-time: rustup add target triples
+make targets-install      # optional: preinstall all Rust target triples
+make package-all          # build packages for the current host OS
 make package-darwin       # both aarch64 and x86_64 .app + .dmg
 make package-linux        # x86_64 .deb / .AppImage / .rpm
 make package-windows      # x86_64 .msi / .exe
 ```
 
+Each packaging target runs `rustup target add ...` for its Rust target before
+building, so packaging can run directly on a fresh Rust install.
+
 Tauri bundling generally needs to run **on** (or cross-compile to) the
-target OS for code signing, framework deps, etc.
+target OS for code signing, framework deps, Linux WebKit/GTK `pkg-config`
+sysroots, etc. `make package-all` is intentionally host-OS scoped. If a
+complete cross toolchain is configured, use `make package-cross-all` or
+`ALLOW_CROSS=1 make package-linux` to bypass the host guard.
 
 ---
 
@@ -138,6 +145,17 @@ when they're added.
 ---
 
 ## Changelog
+
+### 2026-06-30 — `fix/package-target-install`
+
+- Make packaging targets install their required Rust target triples before
+  invoking `tauri build`.
+- Scope `make package-all` to the current host OS, and add
+  `package-cross-all` / `ALLOW_CROSS=1` for explicit cross-build attempts.
+- Document Linux WebKit/GTK `pkg-config` sysroot requirements for cross
+  packaging.
+- Verified with `make -n package-all`, `make -n package-cross-all`,
+  `cargo test`, `npm run build`, and `git diff --check`.
 
 ### 2026-06-30 — `feature/multi-delete-messages`
 
