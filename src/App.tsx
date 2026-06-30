@@ -1788,42 +1788,39 @@ export default function App() {
             />
             <div className="pane">
               <div
-                className={`selection-bar ${selectedUids.size > 0 ? "" : "empty"}`}
-                aria-hidden={selectedUids.size === 0}
+                className={`selection-bar ${selectedUids.size > 0 ? "" : "dimmed"}`}
               >
-                {selectedUids.size > 0 && (
-                  <>
-                  <span>{selectedUids.size}건 선택</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedUids((prev) => {
-                        const next = new Set(prev);
-                        for (const uid of visibleUids) next.add(uid);
-                        return next;
-                      });
-                    }}
-                    disabled={allVisibleSelected}
-                  >
-                    전체 선택
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteMessagesFromFolder(Array.from(selectedUids))}
-                  >
-                    선택 삭제
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedUids(new Set());
-                      lastCheckedUidRef.current = null;
-                    }}
-                  >
-                    선택 해제
-                  </button>
-                  </>
-                )}
+                <span>{selectedUids.size}건 선택</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedUids((prev) => {
+                      const next = new Set(prev);
+                      for (const uid of visibleUids) next.add(uid);
+                      return next;
+                    });
+                  }}
+                  disabled={visibleUids.length === 0 || allVisibleSelected}
+                >
+                  전체 선택
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteMessagesFromFolder(Array.from(selectedUids))}
+                  disabled={selectedUids.size === 0}
+                >
+                  선택 삭제
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedUids(new Set());
+                    lastCheckedUidRef.current = null;
+                  }}
+                  disabled={selectedUids.size === 0}
+                >
+                  선택 해제
+                </button>
               </div>
               {threads.map((thread) => {
                 const isExpanded = expandedThreads.has(thread.id);
@@ -1884,11 +1881,18 @@ export default function App() {
                               </button>
                             )}
                             {unread && <span className="dot" />}
-                            {flagged && (
-                              <span className="star" title="중요">
-                                ★
-                              </span>
-                            )}
+                            <button
+                              type="button"
+                              className={`star ${flagged ? "active" : ""}`}
+                              title={flagged ? "중요 해제" : "중요 표시"}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                handleToggleFlag(e.uid);
+                              }}
+                            >
+                              {flagged ? "★" : "☆"}
+                            </button>
                             {e.subject}
                             {thread.messages.length > 1 && index === 0 && (
                               <span className="thread-count">

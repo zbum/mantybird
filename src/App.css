@@ -296,13 +296,6 @@ input:focus {
   margin-left: 4px;
   flex-shrink: 0;
 }
-.folder.unsubscribed::before {
-  content: "☆";
-  font-size: 10px;
-  color: #6f7682;
-  margin-right: 4px;
-}
-
 /* Envelope list */
 .envelope {
   padding: 8px 12px;
@@ -368,8 +361,8 @@ input:focus {
   background: #222833;
   font-size: 12px;
 }
-.selection-bar.empty {
-  visibility: hidden;
+.selection-bar.dimmed {
+  opacity: 0.55;
 }
 .selection-bar span {
   flex: 1;
@@ -645,9 +638,20 @@ input:focus {
   flex-shrink: 0;
 }
 .envelope .star {
-  color: #f5c542;
-  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: #7d8490;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
   flex-shrink: 0;
+}
+.envelope .star.active {
+  color: #f5c542;
+}
+.envelope .star:hover {
+  background: transparent;
+  color: #ffd766;
 }
 .topbar button {
   margin-left: 4px;
