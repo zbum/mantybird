@@ -46,6 +46,13 @@ export function deletePermanent(mailbox: string, uid: number): Promise<void> {
   return invoke("delete_permanent", { mailbox, uid });
 }
 
+export function deletePermanentMany(
+  mailbox: string,
+  uids: number[],
+): Promise<void> {
+  return invoke("delete_permanent_many", { mailbox, uids });
+}
+
 export interface DebugLogEntry {
   id: number;
   ts: number;
@@ -158,6 +165,10 @@ export function setFlag(
 
 export function moveToTrash(mailbox: string, uid: number): Promise<void> {
   return invoke("move_to_trash", { mailbox, uid });
+}
+
+export function moveToTrashMany(mailbox: string, uids: number[]): Promise<void> {
+  return invoke("move_to_trash_many", { mailbox, uids });
 }
 
 export function cachedFolders(account: Account): Promise<Folder[]> {

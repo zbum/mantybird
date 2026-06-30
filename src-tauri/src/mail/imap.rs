@@ -959,16 +959,32 @@ pub async fn delete_permanent(
     mailbox: &str,
     uid: u32,
 ) -> Result<()> {
+    delete_permanent_many(session, mailbox, &[uid]).await
+}
+
+pub async fn delete_permanent_many(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uids: &[u32],
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let uid_set = uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     crate::debug_log::push("imap", "→", format!("SELECT {:?}", mailbox));
     session.select(mailbox).await.context("SELECT failed")?;
     crate::debug_log::push("imap", "←", "SELECT OK");
     crate::debug_log::push(
         "imap",
         "→",
-        format!("UID STORE {} +FLAGS (\\Deleted)", uid),
+        format!("UID STORE <{} uids> +FLAGS (\\Deleted)", uids.len()),
     );
     let stream = session
-        .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+        .uid_store(uid_set, "+FLAGS (\\Deleted)")
         .await
         .context("STORE \\Deleted failed")?;
     let _ = stream.try_collect::<Vec<_>>().await?;
@@ -986,6 +1002,23 @@ pub async fn move_message(
     uid: u32,
     dest: &str,
 ) -> Result<()> {
+    move_messages(session, mailbox, &[uid], dest).await
+}
+
+pub async fn move_messages(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uids: &[u32],
+    dest: &str,
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let uid_set = uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     crate::debug_log::push(
         "imap",
         "→",
@@ -997,9 +1030,9 @@ pub async fn move_message(
     crate::debug_log::push(
         "imap",
         "→",
-        format!("UID MOVE {} {:?}", uid, dest),
+        format!("UID MOVE <{} uids> {:?}", uids.len(), dest),
     );
-    match session.uid_mv(uid.to_string(), dest).await {
+    match session.uid_mv(uid_set.clone(), dest).await {
         Ok(()) => {
             crate::debug_log::push("imap", "←", "UID MOVE OK");
             Ok(())
@@ -1013,10 +1046,10 @@ pub async fn move_message(
             crate::debug_log::push(
                 "imap",
                 "→",
-                format!("UID COPY {} {:?}", uid, dest),
+                format!("UID COPY <{} uids> {:?}", uids.len(), dest),
             );
             session
-                .uid_copy(uid.to_string(), dest)
+                .uid_copy(uid_set.clone(), dest)
                 .await
                 .context("COPY (fallback for MOVE) failed")?;
             crate::debug_log::push("imap", "←", "UID COPY OK");
@@ -1024,10 +1057,10 @@ pub async fn move_message(
             crate::debug_log::push(
                 "imap",
                 "→",
-                format!("UID STORE {} {}", uid, store_arg),
+                format!("UID STORE <{} uids> {}", uids.len(), store_arg),
             );
             let stream = session
-                .uid_store(uid.to_string(), store_arg)
+                .uid_store(uid_set, store_arg)
                 .await
                 .context("STORE \\Deleted failed")?;
             let _ = stream.try_collect::<Vec<_>>().await?;

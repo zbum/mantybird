@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -65,6 +66,10 @@ export default function App() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [envelopes, setEnvelopes] = useState<Envelope[]>([]);
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
+  const [selectedUids, setSelectedUids] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const lastCheckedUidRef = useRef<number | null>(null);
   const [body, setBody] = useState<MessageBody | null>(null);
   const [loadingBody, setLoadingBody] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -160,6 +165,11 @@ export default function App() {
     y: number;
     folder: Folder | null;
   } | null>(null);
+  const [messageCtxMenu, setMessageCtxMenu] = useState<{
+    x: number;
+    y: number;
+    uids: number[];
+  } | null>(null);
 
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 480;
@@ -240,17 +250,18 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!ctxMenu) return;
+    if (!ctxMenu && !messageCtxMenu) return;
     function close(e: MouseEvent) {
       const t = e.target as HTMLElement | null;
       if (t && t.closest(".ctx-menu")) return;
       setCtxMenu(null);
+      setMessageCtxMenu(null);
     }
     document.addEventListener("mousedown", close);
     return () => {
       document.removeEventListener("mousedown", close);
     };
-  }, [ctxMenu]);
+  }, [ctxMenu, messageCtxMenu]);
 
   useEffect(() => {
     api
@@ -549,12 +560,19 @@ export default function App() {
         if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return;
         if (t.isContentEditable) return;
       }
-      if (composeDraft || promptState || confirmState || settingsOpen) return;
+      if (
+        composeDraft ||
+        promptState ||
+        confirmState ||
+        settingsOpen ||
+        messageCtxMenu
+      )
+        return;
       // Suppress the browser's default action regardless of whether we can
       // delete — otherwise focus on `body` lets Backspace navigate back.
       e.preventDefault();
       e.stopPropagation();
-      if (selectedUid === null || !selectedFolder) {
+      if ((selectedUid === null && selectedUids.size === 0) || !selectedFolder) {
         setStatus("삭제할 메일을 먼저 선택하세요");
         return;
       }
@@ -565,12 +583,14 @@ export default function App() {
   }, [
     screen,
     selectedUid,
+    selectedUids,
     selectedFolder,
     folders,
     composeDraft,
     promptState,
     confirmState,
     settingsOpen,
+    messageCtxMenu,
   ]);
 
   async function handleConnect(e: React.FormEvent) {
@@ -642,6 +662,8 @@ export default function App() {
     setSelectedFolder(folder.raw);
     setBody(null);
     setSelectedUid(null);
+    setSelectedUids(new Set());
+    lastCheckedUidRef.current = null;
     setEnvelopes([]);
     setNoMore(false);
     setServerResults(null);
@@ -713,6 +735,11 @@ export default function App() {
         return null;
       }
       return prev;
+    });
+    setSelectedUids((prev) => {
+      const next = new Set(prev);
+      for (const uid of removed) next.delete(uid);
+      return next;
     });
     setStatus(`서버에서 ${uids.length}건 삭제 감지 — 목록 정리`);
   }
@@ -1063,6 +1090,8 @@ export default function App() {
         setEnvelopes([]);
         setBody(null);
         setSelectedUid(null);
+        setSelectedUids(new Set());
+        lastCheckedUidRef.current = null;
       }
       setStatus(`삭제: ${folder.leaf}`);
     } catch (err) {
@@ -1131,6 +1160,8 @@ export default function App() {
         setEnvelopes([]);
         setServerResults(null);
         setSelectedUid(null);
+        setSelectedUids(new Set());
+        lastCheckedUidRef.current = null;
         setBody(null);
         setNoMore(true);
       }
@@ -1162,26 +1193,105 @@ export default function App() {
     }
   }
 
+  function handleMessageRowClick(
+    uid: number,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) {
+    if (event.metaKey || event.ctrlKey) {
+      event.preventDefault();
+      handleToggleMessageSelection(uid);
+      return;
+    }
+    if (event.shiftKey) {
+      event.preventDefault();
+      handleRangeMessageSelection(uid);
+      return;
+    }
+    setSelectedUids(new Set());
+    lastCheckedUidRef.current = uid;
+    handleSelectMessage(uid);
+  }
+
+  function handleToggleMessageSelection(uid: number) {
+    setSelectedUids((prev) => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid);
+      else next.add(uid);
+      return next;
+    });
+    lastCheckedUidRef.current = uid;
+  }
+
+  function handleRangeMessageSelection(uid: number) {
+    const visible = visibleThreadEnvelopes.map((e) => e.uid);
+    const last = lastCheckedUidRef.current;
+    setSelectedUids((prev) => {
+      const next = new Set(prev);
+      if (last !== null) {
+        const from = visible.indexOf(last);
+        const to = visible.indexOf(uid);
+        if (from >= 0 && to >= 0) {
+          const [start, end] = from < to ? [from, to] : [to, from];
+          for (const item of visible.slice(start, end + 1)) {
+            next.add(item);
+          }
+        } else {
+          next.add(uid);
+        }
+      } else {
+        next.add(uid);
+      }
+      return next;
+    });
+    lastCheckedUidRef.current = uid;
+  }
+
+  function handleMessageContextMenu(
+    uid: number,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setCtxMenu(null);
+    setMessageCtxMenu({
+      x: event.clientX,
+      y: event.clientY,
+      uids: selectedUids.has(uid) ? Array.from(selectedUids) : [uid],
+    });
+  }
+
   // Optimistically removes a UID from envelopes and server-search results,
   // clears the body if it was the active selection, and returns a rollback
   // closure for the caller to invoke if the underlying API call fails.
   function optimisticallyRemove(uid: number): () => void {
+    return optimisticallyRemoveMany([uid]);
+  }
+
+  function optimisticallyRemoveMany(uids: number[]): () => void {
     const prevEnvelopes = envelopes;
     const prevServerResults = serverResults;
     const prevSelectedUid = selectedUid;
+    const prevSelectedUids = selectedUids;
     const prevBody = body;
-    setEnvelopes((prev) => prev.filter((e) => e.uid !== uid));
+    const removed = new Set(uids);
+    setEnvelopes((prev) => prev.filter((e) => !removed.has(e.uid)));
     setServerResults((prev) =>
-      prev ? prev.filter((e) => e.uid !== uid) : prev,
+      prev ? prev.filter((e) => !removed.has(e.uid)) : prev,
     );
-    if (selectedUid === uid) {
+    setSelectedUids((prev) => {
+      const next = new Set(prev);
+      for (const uid of removed) next.delete(uid);
+      return next;
+    });
+    if (selectedUid !== null && removed.has(selectedUid)) {
       setSelectedUid(null);
       setBody(null);
     }
     return () => {
       setEnvelopes(prevEnvelopes);
       setServerResults(prevServerResults);
-      if (prevSelectedUid === uid) {
+      setSelectedUids(prevSelectedUids);
+      if (prevSelectedUid !== null && removed.has(prevSelectedUid)) {
         setSelectedUid(prevSelectedUid);
         setBody(prevBody);
       }
@@ -1209,26 +1319,25 @@ export default function App() {
     }
   }
 
-  async function deleteSelectedFromKeyboard() {
-    const uid = selectedUid;
+  async function deleteMessagesFromFolder(uids: number[]) {
     const folder = selectedFolder;
-    if (uid === null || !folder) return;
+    if (uids.length === 0 || !folder) return;
     const current = folders.find((f) => f.raw === folder);
     const isProtected =
       current?.special === "Junk" || current?.special === "Trash";
     if (isProtected) {
       const label = current?.special === "Junk" ? "스팸함" : "휴지통";
       const ok = await askConfirm(
-        `${label}의 메일을 완전히 삭제합니다. 복구할 수 없습니다. 계속할까요?`,
+        `${label}의 메일 ${uids.length}건을 완전히 삭제합니다. 복구할 수 없습니다. 계속할까요?`,
       );
       if (!ok) return;
       pausePrefetch(5000);
-      const rollback = optimisticallyRemove(uid);
-      setStatus("완전 삭제 중…");
+      const rollback = optimisticallyRemoveMany(uids);
+      setStatus(`${uids.length}건 완전 삭제 중…`);
       try {
-        await api.deletePermanent(folder, uid);
+        await api.deletePermanentMany(folder, uids);
         await refreshFolderUnreadCount(folder);
-        setStatus("완전 삭제됨");
+        setStatus(`${uids.length}건 완전 삭제됨`);
       } catch (err) {
         rollback();
         setStatus(`완전 삭제 실패: ${err}`);
@@ -1236,19 +1345,30 @@ export default function App() {
       return;
     }
     pausePrefetch(5000);
-    const rollback = optimisticallyRemove(uid);
+    const rollback = optimisticallyRemoveMany(uids);
     const trashFolder = folders.find((f) => f.special === "Trash")?.raw;
-    setStatus("휴지통으로 이동 중…");
+    setStatus(`${uids.length}건 휴지통으로 이동 중…`);
     try {
-      await api.moveToTrash(folder, uid);
+      await api.moveToTrashMany(folder, uids);
       await refreshFolderUnreadCounts(
         trashFolder ? [folder, trashFolder] : [folder],
       );
-      setStatus("휴지통으로 이동");
+      setStatus(`${uids.length}건 휴지통으로 이동`);
     } catch (err) {
       rollback();
       setStatus(`삭제 실패: ${err}`);
     }
+  }
+
+  async function deleteSelectedFromKeyboard() {
+    const targets =
+      selectedUids.size > 0
+        ? Array.from(selectedUids)
+        : selectedUid !== null
+          ? [selectedUid]
+          : [];
+    if (targets.length === 0 || !selectedFolder) return;
+    await deleteMessagesFromFolder(targets);
   }
 
   async function handleSubscribe(folder: Folder) {
@@ -1289,6 +1409,8 @@ export default function App() {
     setEnvelopes([]);
     setSelectedFolder(null);
     setSelectedUid(null);
+    setSelectedUids(new Set());
+    lastCheckedUidRef.current = null;
     setBody(null);
     setScreen("login");
     setPassword("");
@@ -1475,6 +1597,12 @@ export default function App() {
       ),
     [threads, expandedThreads],
   );
+  const visibleUids = visibleThreadEnvelopes.map((e) => e.uid);
+  const visibleSelectedCount = visibleUids.filter((uid) =>
+    selectedUids.has(uid),
+  ).length;
+  const allVisibleSelected =
+    visibleUids.length > 0 && visibleSelectedCount === visibleUids.length;
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1485,7 +1613,8 @@ export default function App() {
         promptState ||
         confirmState ||
         pwPromptState ||
-        ctxMenu
+        ctxMenu ||
+        messageCtxMenu
       )
         return;
       if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
@@ -1525,6 +1654,7 @@ export default function App() {
     confirmState,
     pwPromptState,
     ctxMenu,
+    messageCtxMenu,
     visibleThreadEnvelopes,
     selectedUid,
   ]);
@@ -1657,6 +1787,44 @@ export default function App() {
               title="드래그하여 너비 조절"
             />
             <div className="pane">
+              <div
+                className={`selection-bar ${selectedUids.size > 0 ? "" : "empty"}`}
+                aria-hidden={selectedUids.size === 0}
+              >
+                {selectedUids.size > 0 && (
+                  <>
+                  <span>{selectedUids.size}건 선택</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedUids((prev) => {
+                        const next = new Set(prev);
+                        for (const uid of visibleUids) next.add(uid);
+                        return next;
+                      });
+                    }}
+                    disabled={allVisibleSelected}
+                  >
+                    전체 선택
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteMessagesFromFolder(Array.from(selectedUids))}
+                  >
+                    선택 삭제
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedUids(new Set());
+                      lastCheckedUidRef.current = null;
+                    }}
+                  >
+                    선택 해제
+                  </button>
+                  </>
+                )}
+              </div>
               {threads.map((thread) => {
                 const isExpanded = expandedThreads.has(thread.id);
                 const visible =
@@ -1685,8 +1853,16 @@ export default function App() {
                         <div
                           key={e.uid}
                           data-uid={e.uid}
-                          className={`envelope ${thread.messages.length > 1 && isExpanded ? "thread-child" : ""} ${selectedUid === e.uid ? "selected" : ""} ${unread ? "unread" : ""}`}
-                          onClick={() => handleSelectMessage(e.uid)}
+                          className={`envelope ${thread.messages.length > 1 && isExpanded ? "thread-child" : ""} ${selectedUid === e.uid ? "selected" : ""} ${selectedUids.has(e.uid) ? "multi-selected" : ""} ${unread ? "unread" : ""}`}
+                          onMouseDown={(event) => {
+                            if (event.shiftKey || event.metaKey || event.ctrlKey) {
+                              event.preventDefault();
+                            }
+                          }}
+                          onClick={(event) => handleMessageRowClick(e.uid, event)}
+                          onContextMenu={(event) =>
+                            handleMessageContextMenu(e.uid, event)
+                          }
                         >
                           <div className="subject">
                             {thread.messages.length > 1 && index === 0 && (
@@ -1768,10 +1944,14 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() =>
-                          selectedUid !== null && handleMoveToTrash(selectedUid)
+                          selectedUids.size > 0
+                            ? deleteMessagesFromFolder(Array.from(selectedUids))
+                            : selectedUid !== null && handleMoveToTrash(selectedUid)
                         }
                       >
-                        삭제
+                        {selectedUids.size > 0
+                          ? `선택 ${selectedUids.size}건 삭제`
+                          : "삭제"}
                       </button>
                     </div>
                   </div>
@@ -1898,6 +2078,23 @@ export default function App() {
             const f = ctxMenu.folder;
             setCtxMenu(null);
             if (f) handleUnsubscribe(f);
+          }}
+        />
+      )}
+      {messageCtxMenu && (
+        <MessageContextMenu
+          x={messageCtxMenu.x}
+          y={messageCtxMenu.y}
+          count={messageCtxMenu.uids.length}
+          onDelete={() => {
+            const targets = messageCtxMenu.uids;
+            setMessageCtxMenu(null);
+            deleteMessagesFromFolder(targets);
+          }}
+          onClearSelection={() => {
+            setMessageCtxMenu(null);
+            setSelectedUids(new Set());
+            lastCheckedUidRef.current = null;
           }}
         />
       )}
@@ -2783,6 +2980,28 @@ function FolderContextMenu(props: {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function MessageContextMenu(props: {
+  x: number;
+  y: number;
+  count: number;
+  onDelete: () => void;
+  onClearSelection: () => void;
+}) {
+  return (
+    <div
+      className="ctx-menu"
+      style={{ left: props.x, top: props.y }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      <button onClick={props.onDelete}>
+        {props.count > 1 ? `${props.count}건 삭제` : "삭제"}
+      </button>
+      <button onClick={props.onClearSelection}>선택 해제</button>
     </div>
   );
 }

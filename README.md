@@ -139,6 +139,17 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-30 — `feature/multi-delete-messages`
+
+- Add desktop-style multi-select for messages with Cmd/Ctrl-click toggles,
+  Shift-click range selection, a selected-message action bar, and a message
+  context menu for deletion.
+- Support bulk move-to-trash and bulk permanent delete with a single IMAP
+  UID set operation, keeping lists and cache state in sync.
+- Keep the message list layout stable while selecting or opening context
+  menus.
+- Verified with `cargo test` and `npm run build`.
+
 ### 2026-06-29 — `feature/folder-bulk-actions`
 
 - Add folder context-menu actions for marking every message in a folder as
