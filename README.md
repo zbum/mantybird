@@ -146,6 +146,16 @@ when they're added.
 
 ## Changelog
 
+### 2026-06-30 — `feature/message-selection-toolbar-and-stars`
+
+- Keep the message selection toolbar visible in a dimmed disabled state when
+  no messages are selected.
+- Add a clickable star button to each message row for toggling `\Flagged`
+  without opening the message.
+- Remove the folder-list pseudo-star marker that conflicted visually with
+  message favorite/flag controls.
+- Verified with `cargo test`, `npm run build`, and `git diff --check`.
+
 ### 2026-06-30 — `fix/package-target-install`
 
 - Make packaging targets install their required Rust target triples before
