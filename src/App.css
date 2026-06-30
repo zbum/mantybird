@@ -308,12 +308,16 @@ input:focus {
   padding: 8px 12px;
   border-bottom: 1px solid #2a2d33;
   cursor: pointer;
+  user-select: none;
 }
 .envelope:hover {
   background: #2a2d33;
 }
 .envelope.selected {
   background: #2f3947;
+}
+.envelope.multi-selected {
+  box-shadow: inset 3px 0 0 #6c8cff;
 }
 .envelope .subject {
   font-size: 13px;
@@ -352,6 +356,23 @@ input:focus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 41px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2d33;
+  background: #222833;
+  font-size: 12px;
+}
+.selection-bar.empty {
+  visibility: hidden;
+}
+.selection-bar span {
+  flex: 1;
 }
 .thread-toggle {
   border: none;

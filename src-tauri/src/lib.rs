@@ -678,6 +678,33 @@ async fn delete_permanent(
 }
 
 #[tauri::command]
+async fn delete_permanent_many(
+    state: State<'_, AppState>,
+    mailbox: String,
+    uids: Vec<u32>,
+) -> Result<(), String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+    let mailbox_owned = mailbox.clone();
+    let uids_for_imap = uids.clone();
+    with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        let ids = uids_for_imap.clone();
+        Box::pin(async move { imap_client::delete_permanent_many(sess, &mb, &ids).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .delete_messages(key, mailbox, uids)
+        .await
+    {
+        warn!(error = %e, "cache delete_messages after permanent delete failed");
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn move_to_trash(
     state: State<'_, AppState>,
     mailbox: String,
@@ -710,6 +737,48 @@ async fn move_to_trash(
     if let Err(e) = state
         .cache
         .delete_messages(key, mailbox, vec![uid])
+        .await
+    {
+        warn!(error = %e, "cache delete_messages after move_to_trash failed");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn move_to_trash_many(
+    state: State<'_, AppState>,
+    mailbox: String,
+    uids: Vec<u32>,
+) -> Result<(), String> {
+    let account = ensure_account_loaded(&state).await?;
+    let key = config::account_key(&account);
+    let folders = state
+        .cache
+        .get_folders(key.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let trash = folders
+        .iter()
+        .find(|f| matches!(f.special, SpecialUse::Trash))
+        .map(|f| f.raw.clone())
+        .ok_or_else(|| "Trash folder not found".to_string())?;
+    if trash == mailbox {
+        return Err("이미 휴지통의 메일입니다. 영구 삭제는 별도로 구현 필요.".to_string());
+    }
+    *state.current_mailbox.lock().await = Some(mailbox.clone());
+    let mailbox_owned = mailbox.clone();
+    let trash_owned = trash.clone();
+    let uids_for_imap = uids.clone();
+    with_imap(&state, move |sess| {
+        let mb = mailbox_owned.clone();
+        let t = trash_owned.clone();
+        let ids = uids_for_imap.clone();
+        Box::pin(async move { imap_client::move_messages(sess, &mb, &ids, &t).await })
+    })
+    .await?;
+    if let Err(e) = state
+        .cache
+        .delete_messages(key, mailbox, uids)
         .await
     {
         warn!(error = %e, "cache delete_messages after move_to_trash failed");
@@ -1179,7 +1248,9 @@ pub fn run() {
             delete_mailbox_messages,
             set_flag,
             move_to_trash,
+            move_to_trash_many,
             delete_permanent,
+            delete_permanent_many,
             create_mailbox,
             rename_mailbox,
             delete_mailbox,
